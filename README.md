@@ -9,7 +9,7 @@ avoids all of those in the parts it controls.
 
 The name is a blend of **mig**raine and Jelly**fin**.
 
-**Status: alpha 0.2.** Early build. The author cannot run it on Windows; expect bugs and please
+**Status: alpha 0.3.** Early build. The author cannot run it on Windows; expect bugs and please
 report them.
 
 ## What it does to stay still
@@ -17,7 +17,7 @@ report them.
 Interface
 - Drawn on the CPU with flat, opaque colours. No gradients, transparency, blur or shadows.
 - Modelled on classic Windows 10 desktop apps: File Explorer's light and dark colours, following
-  the Windows app-mode setting (change it with **Theme** in the side menu).
+  the Windows app-mode setting (change it in the Comfort lab).
 - Text is drawn by GDI with full hinting, the way classic Windows 10 apps draw it, instead of
   Qt's default DirectWrite path. Set `"native_text": false` in `config.json` to switch back.
 - Display scaling is rounded to whole numbers so nothing is resampled at fractional sizes.
@@ -92,6 +92,21 @@ crops black bars automatically. It is **not included** in this repository becaus
 carries no licence notice. Choose **Get auto-crop script** in the side menu to download it from
 the author's GitHub page into your scripts folder, or copy it there yourself. `Shift+C` toggles
 it. It needs `hwdec=no` or a `-copy` mode; the default `mpv.conf` sets `hwdec=auto-copy`.
+
+## Comfort lab
+
+**Comfort lab** in the side menu holds switches for A/B testing the interface. Each applies
+straight away and is remembered. Change one at a time.
+
+| Switch | Options |
+| --- | --- |
+| Text smoothing | ClearType (Windows setting), greyscale, none |
+| Colours | follow Windows, light, dark |
+| Artwork | posters, text only |
+| Scrolling | row by row, whole pages |
+| Size | large, compact |
+| Width | full screen width, centre of the screen only |
+| Window | fullscreen, ordinary maximised window |
 
 ## How this differs from a native Windows 10 app
 
