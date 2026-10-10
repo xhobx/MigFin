@@ -9,16 +9,20 @@ avoids all of those in the parts it controls.
 
 The name is a blend of **mig**raine and Jelly**fin**.
 
-**Status: alpha 0.1.** First build. It has not yet been run on Windows by its author; expect bugs
-and please report them.
+**Status: alpha 0.2.** Early build. The author cannot run it on Windows; expect bugs and please
+report them.
 
 ## What it does to stay still
 
 Interface
 - Drawn on the CPU with flat, opaque colours. No gradients, transparency, blur or shadows.
+- Modelled on classic Windows 10 desktop apps: File Explorer's light and dark colours, following
+  the Windows app-mode setting (change it with **Theme** in the side menu).
+- Text is drawn by GDI with full hinting, the way classic Windows 10 apps draw it, instead of
+  Qt's default DirectWrite path. Set `"native_text": false` in `config.json` to switch back.
+- Display scaling is rounded to whole numbers so nothing is resampled at fractional sizes.
 - Nothing animates. No fades, slides, smooth scrolling, spinners or blinking text cursor.
   Focus moves in a single frame, shown by a solid outline.
-- Soft off-white on charcoal rather than pure white on pure black.
 - Questions appear as full pages, not pop-up windows.
 
 Video (re-applied before every playback while `enforce_safe` is on)
@@ -48,7 +52,8 @@ Settings > Accessibility > Visual effects > Animation effects.
 
 1. Download `MigFin-windows-x64.zip` from the Releases page.
 2. Unzip anywhere and run `MigFin\MigFin.exe`.
-3. Enter your server address, username and password. The keyboard is only needed for this step.
+3. Enter your server address, username and password. Press Enter (A on a controller) on a box
+   to use the on-screen keyboard, or type on a real keyboard.
 
 If it reports that libmpv cannot be loaded, update your graphics driver: recent libmpv builds
 need `vulkan-1.dll`, which GPU drivers install.
@@ -88,6 +93,15 @@ carries no licence notice. Choose **Get auto-crop script** in the side menu to d
 the author's GitHub page into your scripts folder, or copy it there yourself. `Shift+C` toggles
 it. It needs `hwdec=no` or a `-copy` mode; the default `mpv.conf` sets `hwdec=auto-copy`.
 
+## How this differs from a native Windows 10 app
+
+MigFin's interface is built with Qt 6 Widgets, not a Microsoft UI toolkit. Qt paints every
+control itself in software and hands Windows a finished bitmap, so no GPU effects are involved,
+but its defaults differ from classic Windows 10 apps (File Explorer, Notepad, Control Panel),
+which draw with GDI and the Windows theme engine. From 0.2 MigFin closes the gaps it can: GDI
+text, Windows 10 colours, whole-number scaling. Video is a separate path: mpv renders with
+Direct3D 11 on the GPU, as nearly every modern video player does.
+
 ## Run from source
 
 ```
@@ -109,7 +123,7 @@ bundles libmpv and publishes it as a pre-release. No local build tools are neede
 - Direct play only; the server never transcodes. mpv plays almost anything, but there is no
   fallback for very slow connections.
 - External subtitle files stored beside the video are not loaded yet. Embedded tracks work.
-- No search, no on-screen keyboard, no music or photo libraries.
+- No search, no music or photo libraries.
 - No automatic next episode.
 - The sign-in token is stored unencrypted in `config.json`.
 
@@ -117,7 +131,7 @@ bundles libmpv and publishes it as a pre-release. No local build tools are neede
 
 1. Fixes from first real-world testing
 2. External subtitles and remembered audio/subtitle language
-3. Search with an on-screen keyboard, so no physical keyboard is ever needed
+3. Search, using the on-screen keyboard
 4. Optional "play next episode" prompt (static, never a countdown animation)
 5. Poster cache on disk
 6. In-app settings page
