@@ -1,0 +1,59 @@
+name: Build Windows exe
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Fetch libmpv (shinchiro build, GPL)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download --repo shinchiro/mpv-winbuild-cmake --pattern "mpv-dev-x86_64-2*.7z" --dir mpvdev
+          $archive = Get-ChildItem mpvdev\*.7z | Select-Object -First 1
+          7z x $archive.FullName -ompvdev -y
+          Copy-Item mpvdev\libmpv-2.dll .
+          "LIBMPV_BUILD=$($archive.BaseName)" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: pyinstaller --noconfirm --windowed --name MigFin --add-binary "libmpv-2.dll;." main.py
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item LICENSE, README.md dist\MigFin\
+          Compress-Archive -Path dist\MigFin -DestinationPath MigFin-windows-x64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MigFin-windows-x64
+          path: MigFin-windows-x64.zip
+
+      - name: Publish alpha release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: alpha-${{ github.run_number }}
+          name: MigFin alpha ${{ github.run_number }}
+          prerelease: true
+          files: MigFin-windows-x64.zip
+          body: |
+            Automated alpha build of commit ${{ github.sha }}.
+            Unzip anywhere and run `MigFin\MigFin.exe`.
+            Bundled libmpv: ${{ env.LIBMPV_BUILD }} (GPL), from shinchiro/mpv-winbuild-cmake.
