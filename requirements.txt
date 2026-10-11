@@ -1,2 +1,2 @@
-PySide6-Essentials>=6.6
+wxPython>=4.2.2
 python-mpv>=1.0.5

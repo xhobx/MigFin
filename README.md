@@ -9,22 +9,24 @@ avoids all of those in the parts it controls.
 
 The name is a blend of **mig**raine and Jelly**fin**.
 
-**Status: alpha.** Early build. The build number is shown at the bottom of the side menu and in
+**Status: alpha.** Early build. The build number is shown in the bottom corner of the library screen and in
 Settings > About, and matches the release it came from. The author cannot run it on Windows; expect bugs and please
 report them.
 
 ## What it does to stay still
 
 Interface
-- Drawn on the CPU with flat, opaque colours. No gradients, transparency, blur or shadows.
-- Modelled on classic Windows 10 desktop apps: File Explorer's light and dark colours, following
-  the Windows app-mode setting (change it in Settings > Comfort lab).
-- Text is drawn by GDI with full hinting, the way classic Windows 10 apps draw it, instead of
-  Qt's default DirectWrite path. Set `"native_text": false` in `config.json` to switch back.
-- Display scaling is rounded to whole numbers so nothing is resampled at fractional sizes.
-- Nothing animates. No fades, slides, smooth scrolling, spinners or blinking text cursor.
-  Focus moves in a single frame, shown by a solid outline.
-- Questions appear as full pages, not pop-up windows.
+
+- Built only from Windows' own classic controls: list boxes, edit boxes, push buttons and plain
+  text. Windows creates and paints every one of them, exactly as it does for Notepad, Control
+  Panel and other classic Windows 10 programs.
+- MigFin sets no colours and draws nothing itself. Text is rendered by Windows with the system
+  font settings, including whatever ClearType setting you use.
+- A horizontal menu bar across the top, in the spirit of Kodi's classic layout: Left and Right
+  move between libraries, Down or Enter goes into the list, Up from the top row returns to the bar.
+- Posters are shown in the Windows list-view control's icon view, the same control File Explorer
+  uses for its large-icon view. A plain text list is available under Settings > Artwork.
+- No custom animation of any kind. Questions appear as full pages, not pop-up windows.
 
 Video (re-applied before every playback while `enforce_safe` is on)
 
@@ -94,29 +96,21 @@ notice. Download it from the author's GitHub page and copy it into the `scripts`
 (**Settings > mpv folder** opens the right place). `Shift+C` toggles
 it. It needs `hwdec=no` or a `-copy` mode; the default `mpv.conf` sets `hwdec=auto-copy`.
 
-## Comfort lab
+## About the interface
 
-**Settings > Comfort lab** holds switches for A/B testing the interface. Each applies
-straight away and is remembered. Change one at a time.
+Earlier builds drew their own interface with the Qt toolkit. Even when styled to resemble
+Windows 10, that was still a different renderer. From alpha 9 the interface uses the native
+Windows controls directly (through wxPython, a thin wrapper around them), so what you see is
+produced by the same Windows code as the rest of the classic Windows 10 desktop.
 
-| Switch | Options |
-| --- | --- |
-| Text smoothing | ClearType (Windows setting), greyscale, none |
-| Colours | follow Windows, light, dark |
-| Artwork | posters, text only |
-| Scrolling | row by row, whole pages |
-| Size | large, compact |
-| Width | full screen width, centre of the screen only |
-| Window | fullscreen, ordinary maximised window |
+Two Windows settings affect these controls and are worth checking, in System > About >
+Advanced system settings > Performance > Settings:
 
-## How this differs from a native Windows 10 app
+- "Smooth-scroll list boxes": untick to make lists jump instead of glide.
+- "Animate controls and elements inside windows": untick to stop buttons fading between states.
 
-MigFin's interface is built with Qt 6 Widgets, not a Microsoft UI toolkit. Qt paints every
-control itself in software and hands Windows a finished bitmap, so no GPU effects are involved,
-but its defaults differ from classic Windows 10 apps (File Explorer, Notepad, Control Panel),
-which draw with GDI and the Windows theme engine. From 0.2 MigFin closes the gaps it can: GDI
-text, Windows 10 colours, whole-number scaling. Video is a separate path: mpv renders with
-Direct3D 11 on the GPU, as nearly every modern video player does.
+Text size (large, medium, small) and Artwork (posters or text only) are under **Settings** in the
+menu bar.
 
 ## Run from source
 
@@ -149,15 +143,13 @@ bundles libmpv and publishes it as a pre-release. No local build tools are neede
 2. External subtitles and remembered audio/subtitle language
 3. Search, using the on-screen keyboard
 4. Optional "play next episode" prompt (static, never a countdown animation)
-5. Poster cache on disk
-6. In-app settings page
 
 ## Licence and credits
 
 MigFin is free software under the GNU General Public License, version 3 or later. See `LICENSE`.
 
 It builds on [mpv](https://mpv.io) (GPL/LGPL), [python-mpv](https://github.com/jaseg/python-mpv)
-and [Qt for Python](https://doc.qt.io/qtforpython/) (LGPL). It talks to Jellyfin over the public
+and [wxPython](https://wxpython.org) (wxWindows licence). It talks to Jellyfin over the public
 API and shares no code or artwork with Jellyfin, jellyfin-mpv-shim or Kodi. MigFin is not
 affiliated with any of those projects.
 
