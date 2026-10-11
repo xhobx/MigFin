@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 import wx
 
 APP_NAME = "MigFin"
-BUILD = "9"
+BUILD = "10"
 VERSION = f"alpha {BUILD}"
 
 
@@ -550,15 +550,25 @@ class Gamepad:
         return pressed
 
 
-# ==== interface: real Windows controls through wxPython ==================
-# Every control below is one of Windows' own (list box, edit box, push button,
-# static text), created and painted by Windows itself with the system font
-# renderer and system colours. MigFin sets no colours and draws nothing.
+# ==== interface ==========================================================
+# A Kodi-style layout drawn with plain Windows GDI calls: a home screen with a
+# horizontal menu band, then a library screen of posters or text rows.
+# Navy blue throughout, dark red for the highlight. Nothing animates.
+
+NAVY = (10, 24, 61)          # background
+BAND = (6, 15, 40)           # menu band, poster placeholders under the highlight
+PANEL = (24, 46, 104)        # fields, keys, placeholders, unfocused selection
+RED = (139, 26, 34)          # highlight
+RED_LINE = (170, 34, 44)     # rules on the band, underline of the current menu word
+TEXT = (232, 236, 245)
+MUTED = (138, 152, 190)
 
 TEXT_SIZES = {"large": 20, "medium": 14, "small": 10}
+HOME_SCALE = {"large": 1.0, "medium": 0.8, "small": 0.65}
 TEXT_SIZE_ORDER = ["large", "medium", "small"]
 POSTER_SIZE = (150, 225)      # at 100% display scaling; Windows scaling is applied on top
 WIDE_SIZE = (256, 144)        # episode stills
+HOME_TEXT_HEIGHT = 0.064      # menu word height as a share of screen height (Kodi's, less 25%)
 ENTER_KEYS = (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
 BACK_KEYS = (wx.WXK_ESCAPE, wx.WXK_BACK)
 
@@ -579,6 +589,10 @@ MPV_KEYS = {wx.WXK_LEFT: "LEFT", wx.WXK_RIGHT: "RIGHT", wx.WXK_UP: "UP", wx.WXK_
             wx.WXK_END: "END", wx.WXK_DELETE: "DEL"}
 
 
+def colour(rgb):
+    return wx.Colour(*rgb)
+
+
 def clock(seconds: float) -> str:
     seconds = int(max(seconds, 0))
     h, m, s = seconds // 3600, seconds % 3600 // 60, seconds % 60
@@ -597,16 +611,33 @@ def item_label(item: dict) -> str:
 
 
 def row_label(item: dict) -> str:
-    """One line of the library list: title plus watched / resume state."""
+    """One entry of the library: title plus watched / resume state."""
     label = item_label(item)
     user = item.get("UserData") or {}
     if user.get("PlaybackPositionTicks"):
-        label += f"     (resume at {clock(user['PlaybackPositionTicks'] / 10_000_000)})"
+        label += f"  (resume at {clock(user['PlaybackPositionTicks'] / 10_000_000)})"
     elif user.get("Played"):
-        label += "     (watched)"
+        label += "  (watched)"
     elif user.get("UnplayedItemCount"):
-        label += f"     ({user['UnplayedItemCount']} unwatched)"
+        label += f"  ({user['UnplayedItemCount']} unwatched)"
     return label
+
+
+def wrap_two_lines(dc, text, width):
+    """Split a label over at most two lines that fit the width; the second is cut with '...'."""
+    if dc.GetTextExtent(text)[0] <= width:
+        return [text]
+    words, first = text.split(" "), ""
+    while words:
+        trial = (first + " " + words[0]).strip()
+        if dc.GetTextExtent(trial)[0] > width:
+            break
+        first = trial
+        words.pop(0)
+    if not first:                      # one very long word
+        return [wx.Control.Ellipsize(text, dc, wx.ELLIPSIZE_END, width, wx.ELLIPSIZE_FLAGS_NONE)]
+    rest = wx.Control.Ellipsize(" ".join(words), dc, wx.ELLIPSIZE_END, width, wx.ELLIPSIZE_FLAGS_NONE)
+    return [first, rest]
 
 
 class QuietText(wx.TextCtrl):
@@ -619,76 +650,348 @@ class QuietText(wx.TextCtrl):
         return False
 
 
+class HomePanel(wx.Panel):
+    """The home screen: a dark band low on the screen carrying the menu words."""
+
+    def __init__(self, parent, on_open):
+        super().__init__(parent, style=wx.WANTS_CHARS)
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.titles = []
+        self.sel = 0
+        self.scale = 1.0
+        self.on_open = on_open
+        self.hits = []                 # (x1, x2, index) of the words as last drawn
+        self.band = (0, 0)             # (y, height) of the band as last drawn
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_LEFT_DOWN, self._on_click)
+
+    def AcceptsFocus(self):
+        return True
+
+    def set_titles(self, titles):
+        self.titles = list(titles)
+        self.sel = 0
+        self.Refresh()
+
+    def move(self, delta):
+        target = max(0, min(len(self.titles) - 1, self.sel + delta))
+        if target != self.sel:
+            self.sel = target
+            self.Refresh()
+
+    def _on_click(self, event):
+        x, y = event.GetPosition()
+        if self.band[0] <= y <= self.band[0] + self.band[1]:
+            for x1, x2, index in self.hits:
+                if x1 <= x <= x2:
+                    self.sel = index
+                    self.Refresh()
+                    self.on_open()
+                    break
+        self.SetFocus()
+
+    def _on_paint(self, _event):
+        dc = wx.AutoBufferedPaintDC(self)
+        size = self.GetClientSize()
+        w, h = size.width, size.height
+        dc.SetBackground(wx.Brush(colour(NAVY)))
+        dc.Clear()
+        dc.SetPen(wx.TRANSPARENT_PEN)
+
+        px = max(16, int(h * HOME_TEXT_HEIGHT * self.scale))
+        small = wx.Font(wx.FontInfo(wx.Size(0, max(12, int(px * 0.34)))).FaceName("Segoe UI"))
+        dc.SetFont(wx.Font(wx.FontInfo(wx.Size(0, px)).FaceName("Bahnschrift SemiBold Condensed")))
+        labels = [title.upper() for title in self.titles]
+        widths = [dc.GetTextExtent(label)[0] for label in labels]
+        text_h = dc.GetTextExtent("M")[1]
+        gap = int(px * 1.4)
+        band_h = int(text_h * 1.55)
+        band_y = int(h * 0.72)
+        self.band = (band_y, band_h)
+
+        dc.SetBrush(wx.Brush(colour(BAND)))
+        dc.DrawRectangle(0, band_y, w, band_h)
+        dc.SetBrush(wx.Brush(colour(RED_LINE)))
+        dc.DrawRectangle(0, band_y, w, 3)
+        dc.DrawRectangle(0, band_y + band_h - 3, w, 3)
+
+        # The words stay put and only the highlight moves. They shift sideways only
+        # when there are too many to fit, just enough to keep the current one centred.
+        total = sum(widths) + gap * max(len(labels) - 1, 0)
+        starts, x = [], 0
+        for width in widths:
+            starts.append(x)
+            x += width + gap
+        if total <= w - 2 * gap or not labels:
+            origin = (w - total) // 2
+        else:
+            origin = w // 2 - (starts[self.sel] + widths[self.sel] // 2)
+            origin = max(w - gap - total, min(gap, origin))
+        self.hits = []
+        text_y = band_y + (band_h - text_h) // 2
+        for index, label in enumerate(labels):
+            left = origin + starts[index]
+            current = index == self.sel
+            dc.SetTextForeground(colour(TEXT if current else MUTED))
+            dc.DrawText(label, left, text_y)
+            if current:
+                dc.SetBrush(wx.Brush(colour(RED_LINE)))
+                dc.DrawRectangle(left, band_y + band_h - 3 - max(5, px // 9), widths[index], max(5, px // 9))
+            self.hits.append((left, left + widths[index], index))
+
+        dc.SetFont(small)
+        dc.SetTextForeground(colour(MUTED))
+        stamp = time.strftime("%A, %d %B %Y  |  %H:%M").upper()
+        stamp_w, stamp_h = dc.GetTextExtent(stamp)
+        dc.DrawText(stamp, w - stamp_w - gap // 2, band_y - stamp_h - 8)
+        dc.DrawText(VERSION, gap // 2, h - stamp_h - 12)
+        dc.SetTextForeground(colour(TEXT))
+        dc.DrawText(APP_NAME.upper(), gap // 2, gap // 3)
+
+
+class TileView(wx.Panel):
+    """A grid of posters or a list of text rows, with a dark red block on the current entry.
+
+    Scrolling is by whole rows and happens in a single step.
+    """
+
+    def __init__(self, parent, on_select=None, on_activate=None):
+        super().__init__(parent, style=wx.WANTS_CHARS)
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.labels = []
+        self.images = {}               # entry index -> wx.Bitmap
+        self.grid = False
+        self.thumb = (0, 0)
+        self.sel = -1
+        self.top = 0                   # first visible row
+        self.on_select = on_select
+        self.on_activate = on_activate
+        self.Bind(wx.EVT_PAINT, self._on_paint)
+        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SET_FOCUS, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_KILL_FOCUS, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_LEFT_DOWN, self._on_click)
+        self.Bind(wx.EVT_LEFT_DCLICK, self._on_double)
+        self.Bind(wx.EVT_MOUSEWHEEL, self._on_wheel)
+
+    def AcceptsFocus(self):
+        return True
+
+    # ---- contents -------------------------------------------------------
+    def set_rows(self, labels, grid=False, thumb=(0, 0)):
+        self.labels = list(labels)
+        self.images = {}
+        self.grid = grid
+        self.thumb = thumb
+        self.sel = 0 if self.labels else -1
+        self.top = 0
+        self.Refresh()
+
+    def set_image(self, index, bitmap):
+        self.images[index] = bitmap
+        first, last = self.visible_range()
+        if first <= index < last:
+            self.Refresh()
+
+    # ---- geometry -------------------------------------------------------
+    def _client(self):
+        size = self.GetClientSize()
+        return size.width, size.height
+
+    def metrics(self):
+        """(columns, cell width, cell height, left margin, whole rows that fit)"""
+        w, h = self._client()
+        line = self.GetCharHeight()
+        if self.grid:
+            pad = max(6, line // 3)
+            cell_w = self.thumb[0] + pad * 2
+            cell_h = self.thumb[1] + pad * 2 + int(line * 2.3)
+            cols = max(1, w // max(cell_w, 1))
+            left = (w - cols * cell_w) // 2
+        else:
+            cell_w, cell_h, cols, left = w, int(line * 1.7), 1, 0
+        return cols, cell_w, cell_h, left, max(1, h // max(cell_h, 1))
+
+    def visible_range(self):
+        cols, _cw, _ch, _left, rows = self.metrics()
+        return self.top * cols, min(len(self.labels), (self.top + rows + 1) * cols)
+
+    # ---- selection ------------------------------------------------------
+    def select(self, index, notify=True):
+        if not self.labels:
+            return
+        index = max(0, min(len(self.labels) - 1, index))
+        self.sel = index
+        cols, _cw, _ch, _left, rows = self.metrics()
+        row = index // cols
+        if row < self.top:
+            self.top = row
+        elif row >= self.top + rows:
+            self.top = row - rows + 1
+        self.Refresh()
+        if notify and self.on_select:
+            self.on_select()
+
+    def move(self, dx, dy):
+        """Move the highlight one step. Returns False at an edge."""
+        count = len(self.labels)
+        if not count or self.sel < 0:
+            return False
+        cols = self.metrics()[0]
+        if dx:
+            target = self.sel + dx
+            if target < 0 or target >= count or target // cols != self.sel // cols:
+                return False
+        else:
+            target = self.sel + dy * cols
+            if target < 0:
+                return False
+            if target >= count:
+                if self.sel // cols == (count - 1) // cols:
+                    return False
+                target = count - 1         # short last row: land on its final entry
+        self.select(target)
+        return True
+
+    def page(self, direction):
+        cols, _cw, _ch, _left, rows = self.metrics()
+        if self.labels:
+            self.select(self.sel + direction * cols * rows)
+
+    def jump(self, char):
+        """Go to the next entry starting with this letter or digit."""
+        count = len(self.labels)
+        for step in range(1, count + 1):
+            index = (max(self.sel, 0) + step) % count
+            if self.labels[index].lower().startswith(char.lower()):
+                self.select(index)
+                return True
+        return False
+
+    # ---- mouse ----------------------------------------------------------
+    def _hit(self, position):
+        cols, cell_w, cell_h, left, _rows = self.metrics()
+        col = (position.x - left) // max(cell_w, 1)
+        index = (position.y // max(cell_h, 1) + self.top) * cols + col
+        return index if 0 <= col < cols and 0 <= index < len(self.labels) else -1
+
+    def _on_click(self, event):
+        self.SetFocus()
+        index = self._hit(event.GetPosition())
+        if index >= 0:
+            self.select(index)
+
+    def _on_double(self, event):
+        if self._hit(event.GetPosition()) >= 0 and self.on_activate:
+            self.on_activate()
+
+    def _on_wheel(self, event):
+        cols, _cw, _ch, _left, rows = self.metrics()
+        last_top = max(0, (len(self.labels) - 1) // cols - rows + 1)
+        top = max(0, min(last_top, self.top + (-1 if event.GetWheelRotation() > 0 else 1)))
+        if top != self.top:
+            self.top = top
+            self.Refresh()
+
+    # ---- drawing --------------------------------------------------------
+    def _on_paint(self, _event):
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.SetBackground(wx.Brush(colour(NAVY)))
+        dc.Clear()
+        dc.SetFont(self.GetFont())
+        dc.SetPen(wx.TRANSPARENT_PEN)
+        cols, cell_w, cell_h, left, rows = self.metrics()
+        line = self.GetCharHeight()
+        focused = self.HasFocus()
+        pad = max(6, line // 3)
+        first = self.top * cols
+        for index in range(first, min(len(self.labels), (self.top + rows + 1) * cols)):
+            x = left + (index % cols) * cell_w
+            y = (index // cols - self.top) * cell_h
+            current = index == self.sel
+            if current:
+                dc.SetBrush(wx.Brush(colour(RED if focused else PANEL)))
+                dc.DrawRectangle(x, y, cell_w, cell_h)
+            dc.SetTextForeground(colour(TEXT))
+            label = self.labels[index]
+            if not self.grid:
+                text = wx.Control.Ellipsize(label, dc, wx.ELLIPSIZE_END, cell_w - line * 2, wx.ELLIPSIZE_FLAGS_NONE)
+                dc.DrawText(text, x + line, y + (cell_h - line) // 2)
+                continue
+            thumb_w, thumb_h = self.thumb
+            bitmap = self.images.get(index)
+            if bitmap is not None:
+                dc.DrawBitmap(bitmap, x + pad + (thumb_w - bitmap.GetWidth()) // 2,
+                              y + pad + (thumb_h - bitmap.GetHeight()) // 2)
+            else:
+                dc.SetBrush(wx.Brush(colour(BAND if current else PANEL)))
+                dc.DrawRectangle(x + pad, y + pad, thumb_w, thumb_h)
+            for number, text in enumerate(wrap_two_lines(dc, label, thumb_w)):
+                text_w = dc.GetTextExtent(text)[0]
+                dc.DrawText(text, x + (cell_w - text_w) // 2, y + pad + thumb_h + 4 + number * line)
+
+
 class MainFrame(wx.Frame):
     def __init__(self, config):
         super().__init__(None, title=APP_NAME, size=(1600, 900))
         self.config = config
         self.api = None
-        self.entries = []            # menu bar entries
-        self.menu_buttons = []       # one native toggle button per entry
-        self.menu_index = -1
-        self.image_list = None
-        self.thumb = (0, 0)
+        self.entries = []            # home menu entries
+        self.items = []              # Jellyfin items behind the entries of the library screen
+        self.stack = []              # navigation trail inside a library
+        self.generation = 0          # bumps on every load; stale replies are dropped
+        self.restore_row = 0
         self.wide = False
+        self.thumb = (0, 0)
         self.art_generation = 0
         self.art_requested = set()
-        self.items = []              # Jellyfin items behind the rows of the library list
-        self.stack = []              # navigation trail for the library list
-        self.generation = 0          # bumps on every load; stale replies are dropped
-        self.focus_after_load = False
-        self.restore_row = 0
         self.now_playing = None
         self.ticks = 0
         self.choice_callback = None
         self.osk_target = None
         self.osk_layer = "lower"
         self.page = None
+        self.clock_minute = ""
         self.player = Player(enforce_safe=bool(config["enforce_safe"]),
                              on_finished=self._playback_finished)
 
         self._build_login()
+        self.p_home = HomePanel(self, self._home_open)
         self._build_browse()
         self._build_choice()
         self._build_playing()
-        self.pages = [self.p_login, self.p_browse, self.p_choice, self.p_playing]
+        self.pages = [self.p_login, self.p_home, self.p_browse, self.p_choice, self.p_playing]
         sizer = wx.BoxSizer(wx.VERTICAL)
         for page in self.pages:
             sizer.Add(page, 1, wx.EXPAND)
             page.Hide()
         self.SetSizer(sizer)
 
-        self.side_timer = wx.Timer(self)
         self.play_timer = wx.Timer(self)
         self.pad_timer = wx.Timer(self)
         self.art_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, lambda _e: self._side_settled(), self.side_timer)
+        self.clock_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, lambda _e: self._playback_tick(), self.play_timer)
         self.Bind(wx.EVT_TIMER, lambda _e: self._poll_gamepad(), self.pad_timer)
         self.Bind(wx.EVT_TIMER, lambda _e: self._request_art(), self.art_timer)
-        self.art_timer.Start(350)
+        self.Bind(wx.EVT_TIMER, lambda _e: self._clock_tick(), self.clock_timer)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self.gamepad = Gamepad()
         if self.gamepad.available:
             self.pad_timer.Start(40)
-        self._apply_fonts()
+        self.art_timer.Start(350)
+        self.clock_timer.Start(10000)
+        self._apply_look()
 
     def start(self):
-        self._show_focus_cues()
         if self.config["token"] and self.config["server"]:
             self.api = Jellyfin(self.config["server"], self.config["device_id"],
                                 self.config["token"], self.config["user_id"])
             self._start_session()
         else:
             self._show_login()
-
-    def _show_focus_cues(self):
-        """Ask Windows to draw focus rectangles from the start (it hides them until Tab is used)."""
-        if os.name == "nt":
-            try:
-                ctypes.windll.user32.SendMessageW(self.GetHandle(), 0x0127, (1 << 16) | 2, 0)
-            except Exception:
-                pass
 
     # ---- construction ---------------------------------------------------
     @staticmethod
@@ -703,19 +1006,33 @@ class MainFrame(wx.Frame):
         down.AddStretchSpacer(bottom)
         panel.SetSizer(down)
 
+    def _make_button(self, parent, label):
+        """A flat navy button that turns dark red while it has the focus."""
+        button = wx.Button(parent, label=label, style=wx.BORDER_NONE)
+        button.Bind(wx.EVT_SET_FOCUS, lambda e, b=button: self._button_focus(e, b, True))
+        button.Bind(wx.EVT_KILL_FOCUS, lambda e, b=button: self._button_focus(e, b, False))
+        return button
+
+    @staticmethod
+    def _button_focus(event, button, focused):
+        button.SetBackgroundColour(colour(RED if focused else PANEL))
+        button.Refresh()
+        event.Skip()
+
     def _build_login(self):
         p = self.p_login = wx.Panel(self)
-        self.login_title = wx.StaticText(p, label=APP_NAME)
+        self.login_title = wx.StaticText(p, label=APP_NAME.upper())
         self.login_hint_text = ("Sign in to your Jellyfin server. Press Enter (A on a controller) on a box "
                                 "to type with the on-screen keyboard, or just type on a real keyboard.")
         self.login_hint = wx.StaticText(p, label=self.login_hint_text)
-        self.f_server = wx.TextCtrl(p)
-        self.f_user = wx.TextCtrl(p)
-        self.f_pass = wx.TextCtrl(p, style=wx.TE_PASSWORD)
+        self.f_server = wx.TextCtrl(p, style=wx.BORDER_SIMPLE)
+        self.f_user = wx.TextCtrl(p, style=wx.BORDER_SIMPLE)
+        self.f_pass = wx.TextCtrl(p, style=wx.TE_PASSWORD | wx.BORDER_SIMPLE)
         self.fields = [self.f_server, self.f_user, self.f_pass]
-        self.b_connect = wx.Button(p, label="Connect")
+        self.b_connect = self._make_button(p, "Connect")
         self.b_connect.Bind(wx.EVT_BUTTON, lambda _e: self._submit_login())
         self.login_error = wx.StaticText(p, label="")
+        self.captions = []
 
         grid = wx.GridBagSizer(4, 4)
         self.key_buttons = []        # 4 rows of 10 character keys
@@ -724,14 +1041,14 @@ class MainFrame(wx.Frame):
         for r in range(OSK_ROWS):
             line = []
             for c in range(OSK_COLS):
-                button = wx.Button(p, label="")
+                button = self._make_button(p, "")
                 button.Bind(wx.EVT_BUTTON, lambda _e, r=r, c=c: self._osk_press(r, c))
                 grid.Add(button, pos=(r, c), flag=wx.EXPAND)
                 self.key_pos[button.GetId()] = (r, c)
                 line.append(button)
             self.key_buttons.append(line)
         for index, (label, first, width) in enumerate(OSK_SPECIAL):
-            button = wx.Button(p, label=label)
+            button = self._make_button(p, label)
             button.Bind(wx.EVT_BUTTON, lambda _e, i=index: self._osk_press(OSK_ROWS, i))
             grid.Add(button, pos=(OSK_ROWS, first), span=(1, width), flag=wx.EXPAND)
             self.key_pos[button.GetId()] = (OSK_ROWS, index)
@@ -743,7 +1060,9 @@ class MainFrame(wx.Frame):
         col.Add(self.login_hint, 0, wx.BOTTOM, 16)
         for caption, field in (("Server address, for example http://192.168.1.10:8096", self.f_server),
                                ("Username", self.f_user), ("Password", self.f_pass)):
-            col.Add(wx.StaticText(p, label=caption), 0, wx.BOTTOM, 2)
+            text = wx.StaticText(p, label=caption)
+            self.captions.append(text)
+            col.Add(text, 0, wx.BOTTOM, 2)
             col.Add(field, 0, wx.EXPAND | wx.BOTTOM, 10)
         col.Add(self.b_connect, 0, wx.BOTTOM, 8)
         col.Add(self.login_error, 0, wx.EXPAND | wx.BOTTOM, 14)
@@ -752,42 +1071,28 @@ class MainFrame(wx.Frame):
 
     def _build_browse(self):
         p = self.p_browse = wx.Panel(self)
-        self.menu_sizer = wx.WrapSizer(wx.HORIZONTAL)   # the horizontal menu bar; wraps if it is long
-        self.build_label = wx.StaticText(p, label=VERSION)
         self.crumb = wx.StaticText(p, label="")
         self.status = wx.StaticText(p, label="")
-        self.content = wx.ListBox(p, style=wx.LB_SINGLE)
+        self.view = TileView(p, on_select=self._show_info, on_activate=self._activate)
         self.info = QuietText(p, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_NO_VSCROLL | wx.BORDER_NONE)
-        self.content.Bind(wx.EVT_LISTBOX, lambda _e: self._show_info())
-        self.content.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._activate())
-        # Posters use the Windows list-view control in its icon view, as File Explorer does.
-        self.grid = wx.ListCtrl(p, style=wx.LC_ICON | wx.LC_SINGLE_SEL | wx.LC_AUTOARRANGE)
-        self.grid.Bind(wx.EVT_LIST_ITEM_SELECTED, lambda _e: self._show_info())
-        self.grid.Bind(wx.EVT_LIST_ITEM_ACTIVATED, lambda _e: self._activate())
-        self.grid.Hide()
-
+        self.rule = wx.Panel(p, size=(-1, 3))
         header = wx.BoxSizer(wx.HORIZONTAL)
         header.Add(self.crumb, 1, wx.ALIGN_CENTER_VERTICAL)
         header.Add(self.status, 0, wx.ALIGN_CENTER_VERTICAL)
-        footer = wx.BoxSizer(wx.HORIZONTAL)
-        footer.Add(self.info, 1, wx.EXPAND)
-        footer.Add(self.build_label, 0, wx.ALIGN_BOTTOM | wx.LEFT, 16)
         page = wx.BoxSizer(wx.VERTICAL)
-        page.Add(self.menu_sizer, 0, wx.EXPAND | wx.BOTTOM, 14)
         page.Add(header, 0, wx.EXPAND | wx.BOTTOM, 8)
-        page.Add(self.content, 1, wx.EXPAND | wx.BOTTOM, 8)
-        page.Add(self.grid, 1, wx.EXPAND | wx.BOTTOM, 8)
-        page.Add(footer, 0, wx.EXPAND)
+        page.Add(self.rule, 0, wx.EXPAND | wx.BOTTOM, 12)
+        page.Add(self.view, 1, wx.EXPAND | wx.BOTTOM, 10)
+        page.Add(self.info, 0, wx.EXPAND)
         outer = wx.BoxSizer(wx.VERTICAL)
-        outer.Add(page, 1, wx.EXPAND | wx.ALL, 16)
+        outer.Add(page, 1, wx.EXPAND | wx.ALL, 24)
         p.SetSizer(outer)
 
     def _build_choice(self):
         p = self.p_choice = wx.Panel(self)
         self.choice_title = wx.StaticText(p, label="")
         self.choice_detail = wx.StaticText(p, label="")
-        self.options = wx.ListBox(p, style=wx.LB_SINGLE)
-        self.options.Bind(wx.EVT_LISTBOX_DCLICK, lambda _e: self._choice_finish(self.options.GetSelection()))
+        self.options = TileView(p, on_activate=lambda: self._choice_finish(self.options.sel))
         col = self.choice_col = wx.BoxSizer(wx.VERTICAL)
         col.Add(self.choice_title, 0, wx.BOTTOM, 12)
         col.Add(self.choice_detail, 0, wx.EXPAND | wx.BOTTOM, 12)
@@ -801,36 +1106,52 @@ class MainFrame(wx.Frame):
         col.Add(self.playing_text, 0, wx.EXPAND)
         self._centred(p, col)
 
-    def _apply_fonts(self):
-        points = TEXT_SIZES.get(self.config["text_size"], TEXT_SIZES["large"])
+    def _apply_look(self):
+        """Fonts, sizes and the navy / dark red colours for every control."""
+        size_name = self.config["text_size"] if self.config["text_size"] in TEXT_SIZES else "large"
+        points = TEXT_SIZES[size_name]
         base = wx.Font(wx.FontInfo(points).FaceName("Segoe UI"))
         big = wx.Font(wx.FontInfo(round(points * 1.4)).FaceName("Segoe UI").Bold())
 
         def walk(window):
             window.SetFont(base)
+            window.SetBackgroundColour(colour(NAVY))
+            window.SetForegroundColour(colour(TEXT))
             for child in window.GetChildren():
                 walk(child)
 
         walk(self)
         for title in (self.login_title, self.crumb, self.choice_title):
             title.SetFont(big)
+        for quiet in [self.status, self.login_hint, self.choice_detail] + self.captions:
+            quiet.SetForegroundColour(colour(MUTED))
+        for field in self.fields:
+            field.SetBackgroundColour(colour(PANEL))
+        self.rule.SetBackgroundColour(colour(RED_LINE))
+        keys = [b for line in self.key_buttons for b in line] + self.special_buttons
+        for button in keys + [self.b_connect]:
+            button.SetBackgroundColour(colour(PANEL))
+            button.SetForegroundColour(colour(TEXT))
+        self.p_home.scale = HOME_SCALE[size_name]
+
         dc = wx.ClientDC(self)
         dc.SetFont(base)
         char_w, char_h = dc.GetTextExtent("M")
         key = (int(char_h * 2.2), int(char_h * 1.9))
-        for button in [b for line in self.key_buttons for b in line] + self.special_buttons:
+        for button in keys:
             button.SetMinSize(key)
+        self.b_connect.SetMinSize((key[0] * 4, key[1]))
         column = key[0] * OSK_COLS + 4 * (OSK_COLS - 1)
         self.login_col.SetMinSize((column, -1))
         self.login_hint.SetLabel(self.login_hint_text)
         self.login_hint.Wrap(column)
-        self.base_font = base
         self.info.SetMinSize((-1, int(char_h * 4.4)))
         self.choice_col.SetMinSize((char_w * 34, -1))
-        self.options.SetMinSize((-1, int(char_h * 1.5 * 6)))
+        self.options.SetMinSize((-1, int(char_h * 1.7) * 6))
         self.choice_detail.Wrap(char_w * 34)
-        for page in (self.p_login, self.p_browse, self.p_choice, self.p_playing):
+        for page in self.pages:
             page.Layout()
+            page.Refresh()
         self.Layout()
 
     def _show_page(self, page):
@@ -881,11 +1202,9 @@ class MainFrame(wx.Frame):
         run_async(lambda: api.login(username, password), done)
 
     def _start_session(self):
-        self._show_page(self.p_browse)
-        self._set_menu([])
-        self._set_items([])
-        self.crumb.SetLabel("")
-        self._set_status("Loading libraries")
+        self._set_home([])
+        self._show_page(self.p_home)
+        self.p_home.SetFocus()
         api = self.api
 
         def done(views, error):
@@ -899,7 +1218,7 @@ class MainFrame(wx.Frame):
                 else:
                     self._show_login(f"{error}  Leave the password empty and press Connect to retry.")
                 return
-            self._fill_side(views or [])
+            self._set_home(views or [])
 
         run_async(api.views, done)
 
@@ -976,98 +1295,42 @@ class MainFrame(wx.Frame):
             row = new_row
         (self.special_buttons[index] if row == OSK_ROWS else self.key_buttons[row][index]).SetFocus()
 
-    # ---- menu bar -------------------------------------------------------
-    def _set_menu(self, entries):
-        """Rebuild the row of native toggle buttons across the top."""
-        self.entries = entries
-        self.menu_index = -1
-        self.menu_sizer.Clear(True)          # destroys the old buttons
-        self.menu_buttons = []
-        for index, entry in enumerate(entries):
-            button = wx.ToggleButton(self.p_browse, label=entry["title"].replace("&", "&&"))
-            button.SetFont(self.base_font)
-            button.Bind(wx.EVT_TOGGLEBUTTON, lambda _e, i=index: self._menu_clicked(i))
-            self.menu_sizer.Add(button, 0, wx.RIGHT | wx.BOTTOM, 8)
-            self.menu_buttons.append(button)
-        self.p_browse.Layout()
-
-    def _fill_side(self, views):
+    # ---- home screen ----------------------------------------------------
+    def _set_home(self, views):
         api = self.api
-        entries = [{"kind": "section", "title": view.get("Name", "Library"),
-                    "fn": (lambda v=view: api.children(v))} for view in views]
-        entries += [
-            {"kind": "action", "name": "settings", "title": "Settings",
-             "hint": "Text size, mpv folder, about and sign out. Press Enter to open."},
-            {"kind": "action", "name": "exit", "title": "Exit",
-             "hint": f"Press Enter to close {APP_NAME}."},
-        ]
-        self._set_menu(entries)
-        self._set_status("")
-        self._select_menu(0, settle_now=True)
+        self.entries = [{"kind": "section", "title": view.get("Name", "Library"),
+                         "fn": (lambda v=view: api.children(v))} for view in views]
+        self.entries += [{"kind": "action", "name": "settings", "title": "Settings"},
+                         {"kind": "action", "name": "exit", "title": "Exit"}]
+        self.p_home.set_titles([entry["title"] for entry in self.entries])
 
-    def _select_menu(self, index, settle_now=False):
-        """Move to a menu entry: it shows as pressed, takes focus, and its list loads."""
-        if not self.menu_buttons:
+    def _home_open(self):
+        index = self.p_home.sel
+        if not 0 <= index < len(self.entries):
             return
-        index = max(0, min(len(self.menu_buttons) - 1, index))
-        self.menu_index = index
-        for i, button in enumerate(self.menu_buttons):
-            button.SetValue(i == index)
-        self.menu_buttons[index].SetFocus()
-        if settle_now:
-            self.side_timer.Stop()
-            self._side_settled()
-        else:
-            self.side_timer.StartOnce(180)
-
-    def _focus_menu(self):
-        if self.menu_buttons:
-            self.menu_buttons[max(self.menu_index, 0)].SetFocus()
-
-    def _menu_clicked(self, index):
-        self._select_menu(index, settle_now=True)
-        self._side_chosen(True)
-
-    def _side_entry(self):
-        index = self.menu_index
-        return self.entries[index] if 0 <= index < len(self.entries) else None
-
-    def _side_settled(self):
-        entry = self._side_entry()
-        if entry is None or self.page is not self.p_browse:
-            return
-        self.generation += 1
-        if entry["kind"] == "action":
-            self.stack = []
-            self._set_items([])
-            self.crumb.SetLabel(entry["title"])
-            self._set_status("")
-            self.info.SetValue(entry["hint"])
-            return
-        self.stack = [{"title": entry["title"], "fn": entry["fn"], "row": 0}]
-        self._load(focus=False)
-
-    def _side_chosen(self, allow_actions):
-        entry = self._side_entry()
-        if entry is None:
-            return
+        entry = self.entries[index]
         if entry["kind"] == "section":
-            if self.side_timer.IsRunning():           # selection moved a moment ago: load first
-                self.side_timer.Stop()
-                self._side_settled()
-                self.focus_after_load = True
-            elif self.items:
-                if self._selection() < 0:
-                    self._select(0)
-                self._view().SetFocus()
-                self._show_info()
-            return
-        if not allow_actions:                         # Down never triggers Settings or Exit
-            return
-        if entry["name"] == "exit":
-            self.Close()
+            self.stack = [{"title": entry["title"], "fn": entry["fn"], "row": 0}]
+            self._show_page(self.p_browse)
+            self.view.SetFocus()
+            self._load()
         elif entry["name"] == "settings":
             self._open_settings()
+        elif entry["name"] == "exit":
+            self.Close()
+
+    def _go_home(self):
+        self.generation += 1             # drop any list still loading
+        self.stack = []
+        self._show_page(self.p_home)
+        self.p_home.SetFocus()
+
+    def _clock_tick(self):
+        minute = time.strftime("%H:%M")
+        if minute != self.clock_minute:
+            self.clock_minute = minute
+            if self.page is self.p_home:
+                self.p_home.Refresh()
 
     # ---- settings -------------------------------------------------------
     def _open_settings(self, row=0):
@@ -1077,7 +1340,7 @@ class MainFrame(wx.Frame):
             if index == 0:
                 self.config["text_size"] = TEXT_SIZE_ORDER[(TEXT_SIZE_ORDER.index(size) + 1) % len(TEXT_SIZE_ORDER)]
                 self.config.save()
-                self._apply_fonts()
+                self._apply_look()
                 self._open_settings(0)
             elif index == 1:
                 self.config["artwork"] = not self.config["artwork"]
@@ -1094,9 +1357,7 @@ class MainFrame(wx.Frame):
                 self.api = None
                 self._show_login()
             else:
-                self._show_page(self.p_browse)
-                self._focus_menu()
-                self._side_settled()
+                self._go_home()
 
         self._ask("Settings", [f"Text size: {size.capitalize()}",
                                f"Artwork: {'Posters' if self.config['artwork'] else 'Text only'}",
@@ -1106,7 +1367,6 @@ class MainFrame(wx.Frame):
         detail = (f"Version: {VERSION}\n\n"
                   "A calm Jellyfin client that plays through mpv.\n"
                   "The name blends migraine and Jellyfin.\n\n"
-                  "The interface is made only of Windows' own classic controls.\n\n"
                   "Free software under the GNU General Public License, version 3 or later.\n"
                   "Built with wxPython and libmpv.\n\n"
                   f"Settings are stored in {app_dir()}")
@@ -1129,9 +1389,9 @@ class MainFrame(wx.Frame):
         self.choice_detail.Show(bool(detail))
         if detail:
             self.choice_detail.Wrap(self.choice_col.GetMinSize().width)
-        self.options.Set(options)
-        self.options.SetSelection(min(row, len(options) - 1))
+        self.options.set_rows(options)
         self._show_page(self.p_choice)
+        self.options.select(min(row, len(options) - 1), notify=False)
         self.options.SetFocus()
 
     def _choice_finish(self, index):
@@ -1139,131 +1399,29 @@ class MainFrame(wx.Frame):
         if callback:
             callback(index)
 
-    # ---- library list ---------------------------------------------------
+    # ---- library screen -------------------------------------------------
     def _set_status(self, text):
         self.status.SetLabel(text)
         self.p_browse.Layout()
-
-    def _artwork(self):
-        return bool(self.config["artwork"])
-
-    def _view(self):
-        """The control showing the library: the icon view with posters, or the text list."""
-        return self.grid if self._artwork() else self.content
-
-    def _selection(self):
-        return self.grid.GetFirstSelected() if self._artwork() else self.content.GetSelection()
-
-    def _select(self, index):
-        if self._artwork():
-            self.grid.Select(index)
-            self.grid.Focus(index)
-            self.grid.EnsureVisible(index)
-        else:
-            self.content.SetSelection(index)
 
     def _set_items(self, items):
         self.items = list(items)
         self.art_generation += 1
         self.art_requested = set()
-        art = self._artwork()
-        self.grid.Freeze()
-        self.grid.DeleteAllItems()
-        if art:
+        if self.config["artwork"]:
             self.wide = bool(self.items) and all(item.get("Type") == "Episode" for item in self.items)
             size = self.FromDIP(wx.Size(*(WIDE_SIZE if self.wide else POSTER_SIZE)))
             self.thumb = (size.width, size.height)
-            self.image_list = wx.ImageList(size.width, size.height, False)
-            self.image_list.Add(self._canvas(None))             # image 0: blank placeholder
-            self.grid.AssignImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
-            for row, item in enumerate(self.items):
-                self.grid.InsertItem(row, " ".join(row_label(item).split()), 0)
-            self.content.Clear()
+            self.view.set_rows([row_label(item) for item in self.items], grid=True, thumb=self.thumb)
         else:
-            self.content.Set([row_label(item) for item in self.items])
-        self.grid.Thaw()
-        if self.grid.IsShown() != art:
-            self.content.Show(not art)
-            self.grid.Show(art)
-            self.p_browse.Layout()
+            self.view.set_rows([row_label(item) for item in self.items])
         self.info.SetValue("")
 
-    def _canvas(self, data):
-        """A fixed-size picture for the icon view: the art centred on a plain background."""
-        width, height = self.thumb
-        image = None
-        if data:
-            image = wx.Image(io.BytesIO(data))
-            if not image.IsOk():
-                return None
-            scale = min(width / image.GetWidth(), height / image.GetHeight())
-            image = image.Scale(max(1, int(image.GetWidth() * scale)), max(1, int(image.GetHeight() * scale)),
-                                wx.IMAGE_QUALITY_HIGH)
-        bitmap = wx.Bitmap(width, height)
-        dc = wx.MemoryDC(bitmap)
-        dc.SetBackground(wx.Brush(wx.SystemSettings.GetColour(
-            wx.SYS_COLOUR_WINDOW if image is not None else wx.SYS_COLOUR_BTNFACE)))
-        dc.Clear()
-        if image is not None:
-            dc.DrawBitmap(wx.Bitmap(image), (width - image.GetWidth()) // 2, (height - image.GetHeight()) // 2)
-        dc.SelectObject(wx.NullBitmap)
-        return bitmap
-
-    def _request_art(self):
-        """Every third of a second: fetch posters for the rows currently on screen."""
-        if (self.page is not self.p_browse or not self._artwork() or not self.items
-                or self.api is None or not self.grid.IsShown()):
-            return
-        size = self.grid.GetClientSize()
-        seen = []
-        for fx in (0.04, 0.27, 0.5, 0.73, 0.96):
-            for fy in (0.05, 0.35, 0.65, 0.95):
-                hit = self.grid.HitTest(wx.Point(int(size.width * fx), int(size.height * fy)))
-                index = hit[0] if isinstance(hit, (tuple, list)) else hit
-                if isinstance(index, int) and index >= 0:
-                    seen.append(index)
-        if not seen:
-            seen = [0]
-        first, last = max(0, min(seen) - 12), min(len(self.items) - 1, max(seen) + 12)
-        api, generation = self.api, self.art_generation
-        width, height = self.thumb
-        for row in range(first, last + 1):
-            if row in self.art_requested:
-                continue
-            self.art_requested.add(row)
-            url = api.image_url(self.items[row], self.wide, width, height)
-            if not url:
-                continue
-
-            def done(data, error, row=row):
-                if error or not data or generation != self.art_generation:
-                    return
-                bitmap = self._canvas(data)
-                if bitmap is None or row >= self.grid.GetItemCount():
-                    return
-                index = self.image_list.Add(bitmap)
-                if index >= 0:
-                    self.grid.SetItemImage(row, index)
-
-            run_async(lambda url=url: api.fetch(url), done)
-
-    def _at_top_row(self):
-        index = self._selection()
-        if index <= 0:
-            return True
-        if not self._artwork():
-            return False
-        try:
-            return self.grid.GetItemRect(index).y <= self.grid.GetItemRect(0).y
-        except Exception:
-            return False
-
-    def _load(self, focus, row=0):
+    def _load(self, row=0):
         if not self.stack or self.api is None:
             return
         self.generation += 1
         generation = self.generation
-        self.focus_after_load = focus
         self.restore_row = row
         self.crumb.SetLabel("  /  ".join(entry["title"] for entry in self.stack))
         self._set_items([])
@@ -1277,16 +1435,12 @@ class MainFrame(wx.Frame):
             self._set_status(str(error))
             return
         self._set_items(items or [])
-        self._set_status(f"{len(self.items)} items" if self.items else "Nothing here yet")
-        if self.focus_after_load:
-            self.focus_after_load = False
-            if self.items:
-                self._select(min(self.restore_row, len(self.items) - 1))
-            self._view().SetFocus()
-            self._show_info()
+        self._set_status("" if self.items else "Nothing here yet")
+        if self.items:
+            self.view.select(min(self.restore_row, len(self.items) - 1))
 
     def _current_item(self):
-        index = self._selection()
+        index = self.view.sel
         return self.items[index] if 0 <= index < len(self.items) else None
 
     def _show_info(self):
@@ -1294,6 +1448,7 @@ class MainFrame(wx.Frame):
         if data is None:
             self.info.SetValue("")
             return
+        self._set_status(f"{self.view.sel + 1} of {len(self.items)}")
         parts = []
         if data.get("SeriesName") and data.get("Type") == "Episode":
             parts.append(data["SeriesName"])
@@ -1307,22 +1462,58 @@ class MainFrame(wx.Frame):
         overview = data.get("Overview") or ""
         self.info.SetValue(f"{head}\n{overview}" if head else overview)
 
+    def _request_art(self):
+        """Every third of a second: fetch posters for the rows currently on screen."""
+        if (self.page is not self.p_browse or not self.config["artwork"] or not self.items
+                or self.api is None):
+            return
+        first, last = self.view.visible_range()
+        api, generation = self.api, self.art_generation
+        width, height = self.thumb
+        for row in range(first, min(len(self.items), last)):
+            if row in self.art_requested:
+                continue
+            self.art_requested.add(row)
+            url = api.image_url(self.items[row], self.wide, width, height)
+            if not url:
+                continue
+
+            def done(data, error, row=row):
+                if error or not data or generation != self.art_generation:
+                    return
+                bitmap = self._poster(data)
+                if bitmap is not None:
+                    self.view.set_image(row, bitmap)
+
+            run_async(lambda url=url: api.fetch(url), done)
+
+    def _poster(self, data):
+        """Decode a downloaded picture and scale it to fit the poster box, never stretched."""
+        image = wx.Image(io.BytesIO(data))
+        if not image.IsOk():
+            return None
+        width, height = self.thumb
+        scale = min(width / image.GetWidth(), height / image.GetHeight())
+        image = image.Scale(max(1, int(image.GetWidth() * scale)), max(1, int(image.GetHeight() * scale)),
+                            wx.IMAGE_QUALITY_HIGH)
+        return wx.Bitmap(image)
+
     def _back(self):
         if len(self.stack) > 1:
             self.stack.pop()
-            self._load(focus=True, row=self.stack[-1].get("row", 0))
+            self._load(row=self.stack[-1].get("row", 0))
         else:
-            self._focus_menu()
+            self._go_home()
 
     def _activate(self):
         data = self._current_item()
         if data is None:
             return
-        self.stack[-1]["row"] = self._selection()
+        self.stack[-1]["row"] = self.view.sel
         if data.get("IsFolder"):
             api = self.api
             self.stack.append({"title": data.get("Name", ""), "fn": (lambda: api.children(data)), "row": 0})
-            self._load(focus=True)
+            self._load()
             return
         if data.get("MediaType") != "Video":
             self._set_status("This kind of item is not supported yet")
@@ -1334,7 +1525,7 @@ class MainFrame(wx.Frame):
 
         def answer(index):
             self._show_page(self.p_browse)
-            self._view().SetFocus()
+            self.view.SetFocus()
             if index == 0:
                 self._play(data, position)
             elif index == 1:
@@ -1384,7 +1575,7 @@ class MainFrame(wx.Frame):
             return
         self._show_page(self.p_browse)
         self.Raise()
-        self._view().SetFocus()
+        self.view.SetFocus()
         if position is None:
             self._set_status("Playback did not start. Check the file and your mpv.conf.")
             return
@@ -1394,7 +1585,7 @@ class MainFrame(wx.Frame):
         def done(_result, _error):
             # Reload so resume points and watched marks are current.
             if self.stack and self.now_playing is None and self.page is self.p_browse:
-                self._load(focus=True, row=row)
+                self._load(row=row)
 
         run_async(lambda: api.report("stop", data["Id"], position), done)
 
@@ -1445,41 +1636,50 @@ class MainFrame(wx.Frame):
                     return False
                 return True
             return False
+        if self.page is self.p_home:
+            if code == wx.WXK_LEFT:
+                self.p_home.move(-1)
+            elif code == wx.WXK_RIGHT:
+                self.p_home.move(1)
+            elif code in ENTER_KEYS or code == wx.WXK_DOWN:
+                if code in ENTER_KEYS or self.entries[self.p_home.sel]["kind"] == "section":
+                    self._home_open()            # Down opens a library but never Settings or Exit
+            return True
         if self.page is self.p_choice:
-            if code in ENTER_KEYS:
-                self._choice_finish(self.options.GetSelection())
+            if code == wx.WXK_UP:
+                self.options.move(0, -1)
+            elif code == wx.WXK_DOWN:
+                self.options.move(0, 1)
+            elif code in ENTER_KEYS:
+                self._choice_finish(self.options.sel)
             elif code in BACK_KEYS:
                 self._choice_finish(-1)
-            else:
-                return False
             return True
         if self.page is self.p_browse:
-            if focus_id == self._view().GetId():
-                if code in ENTER_KEYS:
-                    self._activate()
-                elif code in BACK_KEYS or (code == wx.WXK_LEFT and not self._artwork()):
-                    self._back()                      # with posters, Left moves between posters
-                elif code == wx.WXK_UP and self._at_top_row():
-                    self._focus_menu()                # Up from the top row returns to the menu bar
-                else:
-                    return False
-                return True
-            # Otherwise the menu bar has (or is given) the focus.
-            ids = [button.GetId() for button in self.menu_buttons]
-            if focus_id not in ids:
-                self._focus_menu()
-            if code == wx.WXK_LEFT:
-                self._select_menu(self.menu_index - 1)
+            view = self.view
+            if code in ENTER_KEYS:
+                self._activate()
+            elif code in BACK_KEYS:
+                self._back()
+            elif code == wx.WXK_LEFT:
+                if not view.move(-1, 0) and not view.grid:
+                    self._back()                 # in the text list, Left goes back a level
             elif code == wx.WXK_RIGHT:
-                self._select_menu(self.menu_index + 1)
-            elif code in ENTER_KEYS:
-                self._side_chosen(True)
+                view.move(1, 0)
+            elif code == wx.WXK_UP:
+                view.move(0, -1)
             elif code == wx.WXK_DOWN:
-                self._side_chosen(False)
-            elif code in (wx.WXK_UP, wx.WXK_SPACE):
-                pass                                  # nothing above the bar; Space must not un-press a button
-            else:
-                return False
+                view.move(0, 1)
+            elif code == wx.WXK_PAGEUP:
+                view.page(-1)
+            elif code == wx.WXK_PAGEDOWN:
+                view.page(1)
+            elif code == wx.WXK_HOME:
+                view.select(0)
+            elif code == wx.WXK_END:
+                view.select(len(self.items) - 1)
+            elif 47 < code < 91 and not (event and (event.ControlDown() or event.AltDown())):
+                view.jump(chr(code))             # a letter or digit jumps to the next matching title
             return True
         return False
 
@@ -1501,15 +1701,6 @@ class MainFrame(wx.Frame):
             name = "Ctrl+" + name
         return name
 
-    def _move_selection(self, listbox, delta):
-        count = listbox.GetCount()
-        if not count:
-            return
-        index = max(0, min(count - 1, listbox.GetSelection() + delta))
-        listbox.SetSelection(index)
-        if listbox is self.content:
-            self._show_info()
-
     def _poll_gamepad(self):
         for button in self.gamepad.poll():
             if self.now_playing is not None:
@@ -1523,27 +1714,11 @@ class MainFrame(wx.Frame):
             code = {"UP": wx.WXK_UP, "DOWN": wx.WXK_DOWN, "LEFT": wx.WXK_LEFT, "RIGHT": wx.WXK_RIGHT,
                     "A": wx.WXK_RETURN, "START": wx.WXK_RETURN, "B": wx.WXK_ESCAPE,
                     "BACK": wx.WXK_ESCAPE}.get(button)
-            if code is None or self._handle_key(code):
-                continue
-            focus = wx.Window.FindFocus()
-            if focus is not None and focus.GetId() == self.grid.GetId():
-                geometry = {wx.WXK_UP: wx.LIST_NEXT_ABOVE, wx.WXK_DOWN: wx.LIST_NEXT_BELOW,
-                            wx.WXK_LEFT: wx.LIST_NEXT_LEFT, wx.WXK_RIGHT: wx.LIST_NEXT_RIGHT}.get(code)
-                if geometry is not None:
-                    target = self.grid.GetNextItem(self._selection(), geometry)
-                    if target >= 0:
-                        self._select(target)
-                        self._show_info()
-                continue
-            if code not in (wx.WXK_UP, wx.WXK_DOWN):
-                continue       # Up / Down in a list: move the selection ourselves
-            focus_id = focus.GetId() if focus is not None else None
-            for listbox in (self.content, self.options):
-                if listbox.GetId() == focus_id:
-                    self._move_selection(listbox, -1 if code == wx.WXK_UP else 1)
+            if code is not None:
+                self._handle_key(code)
 
     def _on_close(self, _event):
-        for timer in (self.side_timer, self.play_timer, self.pad_timer, self.art_timer):
+        for timer in (self.play_timer, self.pad_timer, self.art_timer, self.clock_timer):
             timer.Stop()
         data, self.now_playing = self.now_playing, None
         if data is not None and self.api is not None and self.player.pos is not None:

@@ -9,7 +9,7 @@ avoids all of those in the parts it controls.
 
 The name is a blend of **mig**raine and Jelly**fin**.
 
-**Status: alpha.** Early build. The build number is shown in the bottom corner of the library screen and in
+**Status: alpha.** Early build. The build number is shown in the bottom corner of the home screen and in
 Settings > About, and matches the release it came from. The author cannot run it on Windows; expect bugs and please
 report them.
 
@@ -17,16 +17,15 @@ report them.
 
 Interface
 
-- Built only from Windows' own classic controls: list boxes, edit boxes, push buttons and plain
-  text. Windows creates and paints every one of them, exactly as it does for Notepad, Control
-  Panel and other classic Windows 10 programs.
-- MigFin sets no colours and draws nothing itself. Text is rendered by Windows with the system
-  font settings, including whatever ClearType setting you use.
-- A horizontal menu bar across the top, in the spirit of Kodi's classic layout: Left and Right
-  move between libraries, Down or Enter goes into the list, Up from the top row returns to the bar.
-- Posters are shown in the Windows list-view control's icon view, the same control File Explorer
-  uses for its large-icon view. A plain text list is available under Settings > Artwork.
-- No custom animation of any kind. Questions appear as full pages, not pop-up windows.
+- A home screen in the spirit of Kodi's classic layout: a dark band low on the screen carries the
+  menu words (your libraries, Settings, Exit). Left and Right move the highlight; the words
+  themselves stay where they are.
+- A library screen of posters, or plain text rows (Settings > Artwork).
+- Navy blue throughout, with dark red for the highlight.
+- Drawn with ordinary Windows GDI calls on the CPU. Flat, opaque fills only: no gradients,
+  transparency, blur or shadows.
+- Nothing animates. Scrolling happens a whole row at a time, in one step. Questions appear as
+  full pages, not pop-up windows.
 
 Video (re-applied before every playback while `enforce_safe` is on)
 
@@ -65,8 +64,10 @@ need `vulkan-1.dll`, which GPU drivers install.
 
 | | Keyboard / remote | Controller |
 | --- | --- | --- |
-| Move | arrow keys | d-pad or left stick |
-| Select | Enter | A |
+| Home screen | Left / Right, then Enter (or Down) | d-pad, then A |
+| Library | arrow keys, Page Up / Down, Home / End | d-pad or left stick |
+| Jump to a title | type its first letter | |
+| Open or play | Enter | A |
 | Back | Esc or Backspace | B |
 | During playback | every mpv key | A pause, B stop, d-pad seek, X subtitles |
 
@@ -98,19 +99,9 @@ it. It needs `hwdec=no` or a `-copy` mode; the default `mpv.conf` sets `hwdec=au
 
 ## About the interface
 
-Earlier builds drew their own interface with the Qt toolkit. Even when styled to resemble
-Windows 10, that was still a different renderer. From alpha 9 the interface uses the native
-Windows controls directly (through wxPython, a thin wrapper around them), so what you see is
-produced by the same Windows code as the rest of the classic Windows 10 desktop.
-
-Two Windows settings affect these controls and are worth checking, in System > About >
-Advanced system settings > Performance > Settings:
-
-- "Smooth-scroll list boxes": untick to make lists jump instead of glide.
-- "Animate controls and elements inside windows": untick to stop buttons fading between states.
-
-Text size (large, medium, small) and Artwork (posters or text only) are under **Settings** in the
-menu bar.
+The interface is a small amount of custom drawing on top of wxPython, which hands the drawing to
+Windows GDI. Text size (large, medium, small) and Artwork (posters or text only) are under
+**Settings** on the home screen.
 
 ## Run from source
 
