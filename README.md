@@ -131,7 +131,7 @@ You need libmpv: on Windows put `libmpv-2.dll` next to `main.py`
 
 ## Building the exe
 
-Every push to `main` runs `.github/workflows/build.yml`, which builds the exe with PyInstaller,
+The whole app is one file, `main.py`. Every push to `main` runs `.github/workflows/build.yml`, which builds the exe with PyInstaller,
 bundles libmpv and publishes it as a pre-release. No local build tools are needed.
 
 ## Known limits in this alpha
