@@ -1,6 +1,6 @@
 # MigFin
 
-A calm, 10-foot (TV-style) client for [Jellyfin](https://github.com/jellyfin/jellyfin) that plays
+A calm, controller-friendly client for [Jellyfin](https://github.com/jellyfin/jellyfin) that plays
 everything through [mpv](https://github.com/mpv-player/mpv).
 
 It is written for people whose migraines or motion sickness are triggered by modern rendering:
@@ -9,23 +9,20 @@ avoids all of those in the parts it controls.
 
 The name is a blend of **mig**raine and Jelly**fin**.
 
-**Status: alpha.** Early build. The build number is shown in the bottom corner of the home screen and in
-Settings > About, and matches the release it came from. The author cannot run it on Windows; expect bugs and please
+**Status: alpha.** Early build. The build number is shown under Settings > About, and matches the release it came from. The author cannot run it on Windows; expect bugs and please
 report them.
 
 ## What it does to stay still
 
 Interface
 
-- A home screen in the spirit of Kodi's classic layout: a dark band low on the screen carries the
-  menu words (your libraries, Settings, Exit). Left and Right move the highlight; the words
-  themselves stay where they are.
-- A library screen of posters, or plain text rows (Settings > Artwork).
-- Navy blue throughout, with dark red for the highlight.
-- Drawn with ordinary Windows GDI calls on the CPU. Flat, opaque fills only: no gradients,
-  transparency, blur or shadows.
-- Nothing animates. Scrolling happens a whole row at a time, in one step. Questions appear as
-  full pages, not pop-up windows.
+- An ordinary Windows window with its title bar, sitting above the taskbar. It is never
+  fullscreen and can be moved and resized like any other window.
+- Everything is in one standard Windows tree control, like the folder tree in File Explorer:
+  your libraries at the top level, their contents beneath, and Settings at the bottom.
+- Dark greys with blue accents, all flat colours. No posters and no custom drawing: Windows
+  paints the tree itself, with a plain solid bar on the selected row.
+- A part-watched video opens to offer "Resume from ..." and "Play from the beginning".
 
 Video (re-applied before every playback while `enforce_safe` is on)
 
@@ -62,18 +59,19 @@ need `vulkan-1.dll`, which GPU drivers install.
 
 ## Controls
 
-| | Keyboard / remote | Controller |
+| | Keyboard | Controller |
 | --- | --- | --- |
-| Home screen | Left / Right, then Enter (or Down) | d-pad, then A |
-| Library | arrow keys, Page Up / Down, Home / End | d-pad or left stick |
-| Jump to a title | type its first letter | |
-| Open or play | Enter | A |
-| Back | Esc or Backspace | B |
+| Move up and down | Up / Down | d-pad or left stick |
+| Open a row | Right, or Enter | Right, or A |
+| Close a row / go up a level | Left, Esc or Backspace | Left, or B |
+| Play | Enter | A |
+| Jump to a title | type its first letters | |
 | During playback | every mpv key | A pause, B stop, d-pad seek, X subtitles |
 
 During playback mpv runs in its own fullscreen window with its default key bindings, on-screen
 controller and scripts, exactly like stock mpv. One difference: `q`, `Q` and closing the window
-stop the video and return to the library.
+stop the video and return to MigFin. To keep video in a window too, remove `fullscreen=yes`
+from `mpv.conf` (Settings > Open mpv folder).
 
 ## mpv settings, shortcuts and scripts
 
@@ -99,9 +97,8 @@ it. It needs `hwdec=no` or a `-copy` mode; the default `mpv.conf` sets `hwdec=au
 
 ## About the interface
 
-The interface is a small amount of custom drawing on top of wxPython, which hands the drawing to
-Windows GDI. Text size (large, medium, small) and Artwork (posters or text only) are under
-**Settings** on the home screen.
+The interface is built from Windows' own controls through wxPython, a thin wrapper around them.
+Text size (normal, large, larger) is under **Settings** in the tree.
 
 ## Run from source
 
