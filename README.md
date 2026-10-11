@@ -9,7 +9,8 @@ avoids all of those in the parts it controls.
 
 The name is a blend of **mig**raine and Jelly**fin**.
 
-**Status: alpha 0.4.** Early build. The author cannot run it on Windows; expect bugs and please
+**Status: alpha.** Early build. The build number is shown at the bottom of the side menu and in
+Settings > About, and matches the release it came from. The author cannot run it on Windows; expect bugs and please
 report them.
 
 ## What it does to stay still

@@ -6,3 +6,4 @@ dist/
 mpvdev/
 libmpv-2.dll
 *.zip
+migfin/_build.py
