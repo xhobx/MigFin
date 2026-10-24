@@ -16,12 +16,15 @@ report them.
 
 Interface
 
-- An ordinary Windows window with its title bar, sitting above the taskbar. It is never
-  fullscreen and can be moved and resized like any other window.
-- Everything is in one standard Windows tree control, like the folder tree in File Explorer:
-  your libraries at the top level, their contents beneath, and Settings at the bottom.
-- Dark greys with blue accents, all flat colours. No posters and no custom drawing: Windows
-  paints the tree itself, with a plain solid bar on the selected row.
+- Laid out like File Explorer: an ordinary window (title bar on top, taskbar visible, never
+  fullscreen) split into two panes with a draggable divider.
+- Left: a standard Windows tree. Your libraries (Movies, TV Shows) open to list their titles;
+  a series opens to its seasons, and a season to its episodes. Below them: Watch next,
+  Settings and Exit.
+- Right: medium-size thumbnails of whatever is selected on the left (the titles in a library,
+  the seasons of a series, the episodes of a season, or the one film), with its description
+  underneath.
+- Standard Windows controls and colours throughout, as in File Explorer.
 - A part-watched video opens to offer "Resume from ..." and "Play from the beginning".
 
 Video (re-applied before every playback while `enforce_safe` is on)
@@ -61,11 +64,12 @@ need `vulkan-1.dll`, which GPU drivers install.
 
 | | Keyboard | Controller |
 | --- | --- | --- |
-| Move up and down | Up / Down | d-pad or left stick |
+| Move in the tree | Up / Down | d-pad or left stick |
 | Open a row | Right, or Enter | Right, or A |
 | Close a row / go up a level | Left, Esc or Backspace | Left, or B |
-| Play | Enter | A |
-| Jump to a title | type its first letters | |
+| Across to the thumbnails | Right on a title, or Tab | Right on a title, or RB |
+| Back to the tree | Left from the first column, or Esc | Left, B or LB |
+| Play | Enter on a video | A on a video |
 | During playback | every mpv key | A pause, B stop, d-pad seek, X subtitles |
 
 During playback mpv runs in its own fullscreen window with its default key bindings, on-screen

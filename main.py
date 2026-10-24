@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 import wx
 
 APP_NAME = "MigFin"
-BUILD = "15"
+BUILD = "16"
 VERSION = f"alpha {BUILD}"
 
 
@@ -474,7 +474,7 @@ class Player:
 """Optional XInput controller support (Windows). Does nothing elsewhere."""
 
 _PAD_BUTTONS = {0x0001: "UP", 0x0002: "DOWN", 0x0004: "LEFT", 0x0008: "RIGHT",
-                0x0010: "START", 0x0020: "BACK",
+                0x0010: "START", 0x0020: "BACK", 0x0100: "LB", 0x0200: "RB",
                 0x1000: "A", 0x2000: "B", 0x4000: "X", 0x8000: "Y"}
 _PAD_REPEATING = {"UP", "DOWN", "LEFT", "RIGHT"}
 _PAD_STICK = 16000
@@ -549,21 +549,17 @@ class Gamepad:
         return pressed
 
 
-# ==== interface: an ordinary window holding a tree ========================
-# A normal, resizable Windows window with its title bar, sitting above the
-# taskbar. Everything is in one standard Windows tree control, like the folder
-# tree in File Explorer: libraries at the top level, their contents beneath.
-# No posters and no custom drawing. Dark greys with blue accents, all flat.
-
-GREY = (30, 33, 38)           # window background
-PANEL = (38, 42, 49)          # description strip
-INPUT = (46, 51, 60)          # text boxes and keys
-BLUE = (47, 93, 154)          # the key or button that has the focus
-TEXT = (213, 217, 224)        # soft white
-MUTED = (150, 160, 176)       # secondary text
-SOFT_BLUE = (132, 170, 222)   # status line
+# ==== interface: two panes, like File Explorer ============================
+# An ordinary window (title bar on top, taskbar visible) split in two:
+#   left   a standard Windows tree: libraries, their titles, seasons and
+#          episodes, then Watch next, Settings and Exit
+#   right  a standard Windows list in icon view showing thumbnails of whatever
+#          is selected on the left, with its description underneath
+# Standard Windows controls and colours throughout, as in File Explorer.
 
 TEXT_STEPS = [("normal", 0), ("large", 3), ("larger", 7)]    # points added to the Windows font
+POSTER_SIZE = (150, 225)      # medium thumbnails at 100% display scaling
+WIDE_SIZE = (240, 135)        # episode stills
 ENTER_KEYS = (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
 BACK_KEYS = (wx.WXK_ESCAPE, wx.WXK_BACK)
 
@@ -584,23 +580,20 @@ MPV_KEYS = {wx.WXK_LEFT: "LEFT", wx.WXK_RIGHT: "RIGHT", wx.WXK_UP: "UP", wx.WXK_
             wx.WXK_END: "END", wx.WXK_DELETE: "DEL"}
 
 
-def colour(rgb):
-    return wx.Colour(*rgb)
-
-
 def clock(seconds: float) -> str:
     seconds = int(max(seconds, 0))
     h, m, s = seconds // 3600, seconds % 3600 // 60, seconds % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def item_label(item: dict) -> str:
+def item_label(item: dict, with_series=False) -> str:
     name = item.get("Name") or "Untitled"
     if item.get("Type") == "Episode":
         season, number = item.get("ParentIndexNumber"), item.get("IndexNumber")
-        if season is not None and number is not None:
-            return f"S{season}:E{number}  {name}"
-        return name
+        label = f"S{season}:E{number}  {name}" if season is not None and number is not None else name
+        if with_series and item.get("SeriesName"):
+            label = f"{item['SeriesName']}  -  {label}"
+        return label
     year = item.get("ProductionYear")
     return f"{name} ({year})" if year and item.get("Type") == "Movie" else name
 
@@ -609,9 +602,9 @@ def resume_seconds(item: dict) -> float:
     return ((item.get("UserData") or {}).get("PlaybackPositionTicks") or 0) / 10_000_000
 
 
-def row_label(item: dict) -> str:
+def row_label(item: dict, with_series=False) -> str:
     """The text of a tree row: title plus watched / resume state."""
-    label = item_label(item)
+    label = item_label(item, with_series)
     user = item.get("UserData") or {}
     if user.get("PlaybackPositionTicks"):
         label += f"   (resume at {clock(resume_seconds(item))})"
@@ -638,12 +631,21 @@ class MainFrame(wx.Frame):
         self.config = config
         self.api = None
         self.session = 0             # bumps on sign-in / sign-out; stale replies are dropped
+        self.watch_next = None       # the Watch next tree node
         self.now_playing = None      # the Jellyfin item being played
         self.playing_folder = None   # tree node to refresh when playback ends
         self.ticks = 0
         self.osk_target = None
         self.osk_layer = "lower"
         self.page = None
+        self.pane_items = []         # Jellyfin items shown in the right-hand pane
+        self.pane_node = None        # the tree node they belong to
+        self.pane_wide = False
+        self.pane_focus_after = False
+        self.thumb = (0, 0)
+        self.image_list = None
+        self.art_generation = 0
+        self.art_requested = set()
         self.player = Player(enforce_safe=bool(config["enforce_safe"]),
                              on_finished=self._playback_finished)
 
@@ -655,36 +657,44 @@ class MainFrame(wx.Frame):
             sizer.Add(page, 1, wx.EXPAND)
             page.Hide()
         self.SetSizer(sizer)
+        self.CreateStatusBar()
         self._set_icon()
 
         self.play_timer = wx.Timer(self)
         self.pad_timer = wx.Timer(self)
+        self.pane_timer = wx.Timer(self)
+        self.art_timer = wx.Timer(self)
         self.Bind(wx.EVT_TIMER, lambda _e: self._playback_tick(), self.play_timer)
         self.Bind(wx.EVT_TIMER, lambda _e: self._poll_gamepad(), self.pad_timer)
+        self.Bind(wx.EVT_TIMER, lambda _e: self._update_pane(), self.pane_timer)
+        self.Bind(wx.EVT_TIMER, lambda _e: self._request_art(), self.art_timer)
         self.Bind(wx.EVT_CHAR_HOOK, self._on_char_hook)
         self.Bind(wx.EVT_CLOSE, self._on_close)
         self.gamepad = Gamepad()
         if self.gamepad.available:
             self.pad_timer.Start(40)
+        self.art_timer.Start(350)
         self._apply_fonts()
-        self.SetSize(self.FromDIP(wx.Size(1000, 700)))      # an ordinary window, not maximised
+        self._initial_size()
+
+    def _initial_size(self):
+        """An ordinary window covering most of the desktop, never the taskbar."""
+        try:
+            area = wx.Display(max(wx.Display.GetFromWindow(self), 0)).GetClientArea()
+            width, height = int(area.width * 0.8), int(area.height * 0.85)
+            if width < 400 or height < 300:
+                raise ValueError
+            self.SetSize(width, height)
+        except Exception:
+            self.SetSize(self.FromDIP(wx.Size(1200, 800)))
         self.Centre()
 
     def start(self):
-        if os.name == "nt":
-            handle = self.GetHandle()
-            try:                 # ask Windows to show focus outlines from the start
-                ctypes.windll.user32.SendMessageW(handle, 0x0127, (1 << 16) | 2, 0)
+        if os.name == "nt":      # ask Windows to show focus outlines from the start
+            try:
+                ctypes.windll.user32.SendMessageW(self.GetHandle(), 0x0127, (1 << 16) | 2, 0)
             except Exception:
                 pass
-            for attribute in (20, 19):   # dark title bar (the number differs between Windows 10 versions)
-                try:
-                    value = ctypes.c_int(1)
-                    if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                            handle, attribute, ctypes.byref(value), ctypes.sizeof(value)) == 0:
-                        break
-                except Exception:
-                    break
         if self.config["token"] and self.config["server"]:
             self.api = Jellyfin(self.config["server"], self.config["device_id"],
                                 self.config["token"], self.config["user_id"])
@@ -703,29 +713,16 @@ class MainFrame(wx.Frame):
         except Exception:
             pass
 
-    def _make_button(self, parent, label):
-        """A flat dark button that turns blue while it has the focus."""
-        button = wx.Button(parent, label=label, style=wx.BORDER_NONE)
-        button.Bind(wx.EVT_SET_FOCUS, lambda e, b=button: self._button_focus(e, b, True))
-        button.Bind(wx.EVT_KILL_FOCUS, lambda e, b=button: self._button_focus(e, b, False))
-        return button
-
-    @staticmethod
-    def _button_focus(event, button, focused):
-        button.SetBackgroundColour(colour(BLUE if focused else INPUT))
-        button.Refresh()
-        event.Skip()
-
     def _build_login(self):
         p = self.p_login = wx.Panel(self)
         self.login_hint_text = ("Sign in to your Jellyfin server. Press Enter (A on a controller) on a box "
                                 "to type with the on-screen keyboard, or just type on a real keyboard.")
         self.login_hint = wx.StaticText(p, label=self.login_hint_text)
-        self.f_server = wx.TextCtrl(p, style=wx.BORDER_SIMPLE)
-        self.f_user = wx.TextCtrl(p, style=wx.BORDER_SIMPLE)
-        self.f_pass = wx.TextCtrl(p, style=wx.TE_PASSWORD | wx.BORDER_SIMPLE)
+        self.f_server = wx.TextCtrl(p)
+        self.f_user = wx.TextCtrl(p)
+        self.f_pass = wx.TextCtrl(p, style=wx.TE_PASSWORD)
         self.fields = [self.f_server, self.f_user, self.f_pass]
-        self.b_connect = self._make_button(p, "Connect")
+        self.b_connect = wx.Button(p, label="Connect")
         self.b_connect.Bind(wx.EVT_BUTTON, lambda _e: self._submit_login())
         self.login_error = wx.StaticText(p, label="")
 
@@ -736,28 +733,25 @@ class MainFrame(wx.Frame):
         for r in range(OSK_ROWS):
             line = []
             for c in range(OSK_COLS):
-                button = self._make_button(p, "")
+                button = wx.Button(p, label="")
                 button.Bind(wx.EVT_BUTTON, lambda _e, r=r, c=c: self._osk_press(r, c))
                 grid.Add(button, pos=(r, c), flag=wx.EXPAND)
                 self.key_pos[button.GetId()] = (r, c)
                 line.append(button)
             self.key_buttons.append(line)
         for index, (label, first, width) in enumerate(OSK_SPECIAL):
-            button = self._make_button(p, label)
+            button = wx.Button(p, label=label)
             button.Bind(wx.EVT_BUTTON, lambda _e, i=index: self._osk_press(OSK_ROWS, i))
             grid.Add(button, pos=(OSK_ROWS, first), span=(1, width), flag=wx.EXPAND)
             self.key_pos[button.GetId()] = (OSK_ROWS, index)
             self.special_buttons.append(button)
         self._osk_relabel()
 
-        self.captions = []
         col = self.login_col = wx.BoxSizer(wx.VERTICAL)
         col.Add(self.login_hint, 0, wx.BOTTOM, 14)
         for caption, field in (("Server address, for example http://192.168.1.10:8096", self.f_server),
                                ("Username", self.f_user), ("Password", self.f_pass)):
-            text = wx.StaticText(p, label=caption)
-            self.captions.append(text)
-            col.Add(text, 0, wx.BOTTOM, 2)
+            col.Add(wx.StaticText(p, label=caption), 0, wx.BOTTOM, 2)
             col.Add(field, 0, wx.EXPAND | wx.BOTTOM, 8)
         col.Add(self.b_connect, 0, wx.BOTTOM, 6)
         col.Add(self.login_error, 0, wx.EXPAND | wx.BOTTOM, 12)
@@ -774,23 +768,31 @@ class MainFrame(wx.Frame):
 
     def _build_main(self):
         p = self.p_main = wx.Panel(self)
-        self.tree = wx.TreeCtrl(p, style=(wx.TR_HAS_BUTTONS | wx.TR_LINES_AT_ROOT | wx.TR_NO_LINES
-                                          | wx.TR_FULL_ROW_HIGHLIGHT | wx.TR_HIDE_ROOT | wx.TR_SINGLE
-                                          | wx.BORDER_NONE))
-        try:
-            # Plain solid selection bar; no Explorer-style hover and fade effects.
-            self.tree.EnableSystemTheme(False)
-        except Exception:
-            pass
-        self.info = QuietText(p, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_NO_VSCROLL | wx.BORDER_NONE)
-        self.status_text = wx.StaticText(p, label="")
+        split = self.split = wx.SplitterWindow(p, style=wx.SP_LIVE_UPDATE | wx.SP_3DSASH)
+        split.SetMinimumPaneSize(200)
+        left = wx.Panel(split)
+        right = wx.Panel(split)
+        self.tree = wx.TreeCtrl(left, style=wx.TR_DEFAULT_STYLE | wx.TR_HIDE_ROOT | wx.TR_SINGLE)
+        self.pane = wx.ListCtrl(right, style=wx.LC_ICON | wx.LC_SINGLE_SEL | wx.LC_AUTOARRANGE)
+        self.info = QuietText(right, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_NO_VSCROLL)
         self.tree.Bind(wx.EVT_TREE_ITEM_EXPANDING, self._on_expanding)
-        self.tree.Bind(wx.EVT_TREE_SEL_CHANGED, lambda _e: self._show_info())
+        self.tree.Bind(wx.EVT_TREE_SEL_CHANGED, lambda _e: self._tree_selected())
         self.tree.Bind(wx.EVT_TREE_ITEM_ACTIVATED, self._on_activated)
+        self.tree.Bind(wx.EVT_SET_FOCUS, lambda e: (self._show_info(self._tree_item()), e.Skip()))
+        self.pane.Bind(wx.EVT_LIST_ITEM_SELECTED, lambda _e: self._pane_selected())
+        self.pane.Bind(wx.EVT_LIST_ITEM_ACTIVATED, lambda e: self._pane_activate(e.GetIndex()))
+
+        lsizer = wx.BoxSizer(wx.VERTICAL)
+        lsizer.Add(self.tree, 1, wx.EXPAND)
+        left.SetSizer(lsizer)
+        rsizer = wx.BoxSizer(wx.VERTICAL)
+        rsizer.Add(self.pane, 1, wx.EXPAND)
+        rsizer.Add(self.info, 0, wx.EXPAND | wx.TOP, 4)
+        right.SetSizer(rsizer)
+        split.SplitVertically(left, right, self.FromDIP(380))
+        split.SetSashGravity(0.0)            # resizing the window widens the right-hand pane
         column = wx.BoxSizer(wx.VERTICAL)
-        column.Add(self.tree, 1, wx.EXPAND | wx.ALL, 8)
-        column.Add(self.info, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
-        column.Add(self.status_text, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        column.Add(split, 1, wx.EXPAND | wx.ALL, 4)
         p.SetSizer(column)
 
     def _text_extra(self):
@@ -802,22 +804,10 @@ class MainFrame(wx.Frame):
 
         def walk(window):
             window.SetFont(font)
-            window.SetBackgroundColour(colour(GREY))
-            window.SetForegroundColour(colour(TEXT))
             for child in window.GetChildren():
                 walk(child)
 
         walk(self)
-        keys = [b for line in self.key_buttons for b in line] + self.special_buttons
-        for button in keys + [self.b_connect]:
-            button.SetBackgroundColour(colour(INPUT))
-        for field in self.fields:
-            field.SetBackgroundColour(colour(INPUT))
-        self.info.SetBackgroundColour(colour(PANEL))
-        for quiet in [self.login_hint] + self.captions:
-            quiet.SetForegroundColour(colour(MUTED))
-        self.status_text.SetForegroundColour(colour(SOFT_BLUE))
-        self.login_error.SetForegroundColour(colour(SOFT_BLUE))
         dc = wx.ClientDC(self)
         dc.SetFont(font)
         _char_w, char_h = dc.GetTextExtent("M")
@@ -828,10 +818,9 @@ class MainFrame(wx.Frame):
         self.login_col.SetMinSize((column, -1))
         self.login_hint.SetLabel(self.login_hint_text)
         self.login_hint.Wrap(column)
-        self.info.SetMinSize((-1, int(char_h * 5.5)))
+        self.info.SetMinSize((-1, int(char_h * 6.5)))
         for page in self.pages:
             page.Layout()
-            page.Refresh()
         self.Layout()
 
     def _show_page(self, page):
@@ -844,7 +833,7 @@ class MainFrame(wx.Frame):
         self.Thaw()
 
     def _status(self, text):
-        self.status_text.SetLabel(text)
+        self.SetStatusText(text)
 
     # ---- sign-in --------------------------------------------------------
     def _show_login(self, message=""):
@@ -889,6 +878,7 @@ class MainFrame(wx.Frame):
         self.session += 1
         session, api = self.session, self.api
         self.tree.DeleteAllItems()
+        self._set_pane([], False, None)
         self.info.SetValue("")
         self._show_page(self.p_main)
         self._status("Loading libraries")
@@ -981,13 +971,30 @@ class MainFrame(wx.Frame):
             row = new_row
         (self.special_buttons[index] if row == OSK_ROWS else self.key_buttons[row][index]).SetFocus()
 
-    # ---- the tree -------------------------------------------------------
+    # ---- the tree (left pane) -------------------------------------------
     def _data(self, node):
         return self.tree.GetItemData(node) if node is not None and node.IsOk() else None
 
     def _selected(self):
         node = self.tree.GetSelection()
         return node if node.IsOk() else None
+
+    def _children(self, node):
+        out = []
+        child, cookie = self.tree.GetFirstChild(node)
+        while child.IsOk():
+            out.append(child)
+            child, cookie = self.tree.GetNextChild(node, cookie)
+        return out
+
+    def _watch_next_items(self):
+        """Part-watched videos first, then the next unwatched episode of each series."""
+        seen, items = set(), []
+        for item in self.api.resume() + self.api.next_up():
+            if item.get("Id") not in seen:
+                seen.add(item.get("Id"))
+                items.append(item)
+        return items
 
     def _fill_tree(self, views):
         tree = self.tree
@@ -997,21 +1004,28 @@ class MainFrame(wx.Frame):
         for view in views:
             node = self._add_item(root, view)
             first = first or node
+        self.watch_next = tree.AppendItem(root, "Watch next")
+        tree.SetItemData(self.watch_next, {"kind": "folder", "item": None, "fetch": self._watch_next_items,
+                                           "loaded": False, "loading": False, "wide": True, "series": True,
+                                           "hint": "Videos you are part-way through, and the next episode "
+                                                   "of each series you are watching."})
+        tree.SetItemHasChildren(self.watch_next, True)
         settings = tree.AppendItem(root, "Settings")
         tree.SetItemData(settings, {"kind": "group",
-                                    "hint": "Text size, the mpv folder, about, sign out and exit."})
+                                    "hint": "Text size, the mpv folder, about and sign out."})
         for name, label, hint in (
                 ("text", self._text_label(), "Changes the size of the text in this window."),
                 ("folder", "Open mpv folder", "Opens the folder holding mpv.conf, input.conf and scripts."),
                 ("about", "About", self._about_text()),
-                ("signout", "Sign out", "Forgets the saved sign-in on this PC."),
-                ("exit", "Exit", f"Closes {APP_NAME}.")):
+                ("signout", "Sign out", "Forgets the saved sign-in on this PC.")):
             child = tree.AppendItem(settings, label)
             tree.SetItemData(child, {"kind": "action", "name": name, "hint": hint})
+        leave = tree.AppendItem(root, "Exit")
+        tree.SetItemData(leave, {"kind": "action", "name": "exit", "hint": f"Closes {APP_NAME}."})
         self._status("")
-        tree.SelectItem(first or settings)
+        tree.SelectItem(first or self.watch_next)
         tree.SetFocus()
-        self._show_info()
+        self._tree_selected()
 
     def _text_label(self):
         name = self.config["tree_text"] if self.config["tree_text"] in dict(TEXT_STEPS) else "normal"
@@ -1022,10 +1036,10 @@ class MainFrame(wx.Frame):
                 "Free software under the GNU General Public License, version 3 or later. "
                 f"Built with wxPython and libmpv. Settings are stored in {app_dir()}")
 
-    def _add_item(self, parent, item):
+    def _add_item(self, parent, item, with_series=False):
         """Add one Jellyfin item under a tree node. Folders load their contents when opened."""
         tree = self.tree
-        node = tree.AppendItem(parent, row_label(item))
+        node = tree.AppendItem(parent, row_label(item, with_series))
         if item.get("IsFolder"):
             tree.SetItemData(node, {"kind": "folder", "item": item, "loaded": False, "loading": False})
             tree.SetItemHasChildren(node, True)
@@ -1058,6 +1072,8 @@ class MainFrame(wx.Frame):
             waiting = tree.AppendItem(node, "Loading...")
             tree.SetItemData(waiting, {"kind": "note"})
         session, api, item = self.session, self.api, data["item"]
+        fetch = data.get("fetch") or (lambda: api.children(item))
+        with_series = bool(data.get("series"))
 
         def done(items, error):
             if session != self.session or not node.IsOk():
@@ -1073,7 +1089,7 @@ class MainFrame(wx.Frame):
             else:
                 data["loaded"] = True
                 for child in items or []:
-                    added = self._add_item(node, child)
+                    added = self._add_item(node, child, with_series)
                     if select_id is not None and child.get("Id") == select_id:
                         chosen = added
                 if not items:
@@ -1085,9 +1101,10 @@ class MainFrame(wx.Frame):
             elif was_inside:                     # the row we were on has been replaced
                 first, _cookie = tree.GetFirstChild(node)
                 tree.SelectItem(first if first.IsOk() else node)
-            self._show_info()
+            if self._selected() == node:         # its thumbnails can be shown now
+                self._update_pane()
 
-        run_async(lambda: api.children(item), done)
+        run_async(fetch, done)
 
     def _is_inside(self, node, ancestor):
         """True if node sits somewhere beneath ancestor."""
@@ -1097,30 +1114,37 @@ class MainFrame(wx.Frame):
                 return True
         return False
 
-    def _show_info(self):
-        data = self._data(self._selected())
+    def _tree_item(self):
+        """The Jellyfin item (or settings entry) behind the selected tree row."""
+        return self._data(self._selected())
+
+    def _tree_selected(self):
+        self._show_info(self._tree_item())
+        self.pane_timer.StartOnce(150)       # wait until the selection settles before loading thumbnails
+
+    def _show_info(self, data):
+        """Fill the description box under the thumbnails."""
         if data is None:
             self.info.SetValue("")
             return
-        if "hint" in data:
-            self.info.SetValue(data["hint"])
-            return
-        item = data.get("item")
+        item = data.get("item") if "kind" in data else data
         if not item:
-            self.info.SetValue("")
+            self.info.SetValue(data.get("hint", "") if "kind" in data else "")
             return
-        parts = []
-        if item.get("SeriesName") and item.get("Type") == "Episode":
-            parts.append(item["SeriesName"])
+        parts = [item_label(item, with_series=True)]
         if item.get("ProductionYear") and item.get("Type") != "Movie":
             parts.append(str(item["ProductionYear"]))
         if item.get("RunTimeTicks"):
             parts.append(f"{max(int(item['RunTimeTicks'] / 600_000_000), 1)} min")
         if item.get("OfficialRating"):
             parts.append(item["OfficialRating"])
-        head = "   |   ".join(parts)
+        user = item.get("UserData") or {}
+        if user.get("PlaybackPositionTicks"):
+            parts.append(f"resume at {clock(resume_seconds(item))}")
+        elif user.get("Played"):
+            parts.append("watched")
         overview = item.get("Overview") or ""
-        self.info.SetValue(f"{head}\n{overview}" if head else overview)
+        self.info.SetValue("   |   ".join(parts) + ("\n" + overview if overview else ""))
 
     def _on_activated(self, event):
         # Double-click (Enter is handled in _handle_key). Windows itself opens and closes
@@ -1130,7 +1154,7 @@ class MainFrame(wx.Frame):
             self._activate(node)
 
     def _activate(self, node):
-        """Enter / A on a row: open or close it, play it, or carry out its action."""
+        """Enter / A on a tree row: open or close it, play it, or carry out its action."""
         tree, data = self.tree, self._data(node)
         if data is None:
             return
@@ -1170,7 +1194,9 @@ class MainFrame(wx.Frame):
             self.config["token"] = ""
             self.config.save()
             self.api = None
+            self.watch_next = None
             self.tree.DeleteAllItems()
+            self._set_pane([], False, None)
             self._show_login()
         elif name == "exit":
             self.Close()
@@ -1185,7 +1211,7 @@ class MainFrame(wx.Frame):
             pass
 
     def _step_back(self, node):
-        """Back / B: close the row if it is open, otherwise go up to its parent."""
+        """Back / B in the tree: close the row if it is open, otherwise go up to its parent."""
         tree = self.tree
         if tree.ItemHasChildren(node) and tree.IsExpanded(node):
             tree.Collapse(node)
@@ -1218,12 +1244,198 @@ class MainFrame(wx.Frame):
         elif code == wx.WXK_LEFT:
             self._step_back(node)
 
+    # ---- thumbnails (right pane) ----------------------------------------
+    def _update_pane(self):
+        """Show thumbnails for the selected tree row: a folder's contents, or the video itself."""
+        node = self._selected()
+        data = self._data(node)
+        items, wide = [], False
+        if data is not None:
+            kind = data["kind"]
+            if kind == "folder":
+                if not data["loaded"]:
+                    if not data["loading"]:
+                        self._load_folder(node)  # the pane fills in when the contents arrive
+                    self._set_pane([], False, node)
+                    return
+                items = [self._data(child)["item"] for child in self._children(node)
+                         if (self._data(child) or {}).get("item")]
+                wide = bool(data.get("wide")) or (bool(items) and all(i.get("Type") == "Episode" for i in items))
+            elif kind in ("video", "play"):
+                items = [data["item"]]
+                wide = data["item"].get("Type") == "Episode"
+        self._set_pane(items, wide, node)
+
+    def _set_pane(self, items, wide, node):
+        same = node is not None and node == self.pane_node
+        keep = self._pane_selection() if same else -1     # stay on the same thumbnail after a refresh
+        self.pane_items = list(items)
+        self.pane_node = node
+        self.pane_wide = wide
+        self.art_generation += 1
+        self.art_requested = set()
+        size = self.FromDIP(wx.Size(*(WIDE_SIZE if wide else POSTER_SIZE)))
+        self.thumb = (size.width, size.height)
+        with_series = bool((self._data(node) or {}).get("series"))
+        pane = self.pane
+        pane.Freeze()
+        pane.DeleteAllItems()
+        self.image_list = wx.ImageList(size.width, size.height, False)
+        self.image_list.Add(self._canvas(None))              # image 0: plain placeholder
+        pane.AssignImageList(self.image_list, wx.IMAGE_LIST_NORMAL)
+        for row, item in enumerate(self.pane_items):
+            pane.InsertItem(row, item_label(item, with_series).replace("&", "&&"), 0)
+        pane.Thaw()
+        if not self.pane_items:
+            return
+        if self.pane_focus_after:            # arrived here by opening a thumbnail: carry on in the pane
+            self.pane_focus_after = False
+            pane.SetFocus()
+            self._pane_select(0)
+        elif keep >= 0:
+            pane.Select(min(keep, len(self.pane_items) - 1))
+
+    def _canvas(self, data):
+        """A fixed-size thumbnail: the picture centred and never stretched."""
+        width, height = self.thumb
+        image = None
+        if data:
+            image = wx.Image(io.BytesIO(data))
+            if not image.IsOk():
+                return None
+            scale = min(width / image.GetWidth(), height / image.GetHeight())
+            image = image.Scale(max(1, int(image.GetWidth() * scale)), max(1, int(image.GetHeight() * scale)),
+                                wx.IMAGE_QUALITY_HIGH)
+        bitmap = wx.Bitmap(width, height)
+        dc = wx.MemoryDC(bitmap)
+        dc.SetBackground(wx.Brush(wx.SystemSettings.GetColour(
+            wx.SYS_COLOUR_WINDOW if image is not None else wx.SYS_COLOUR_BTNFACE)))
+        dc.Clear()
+        if image is not None:
+            dc.DrawBitmap(wx.Bitmap(image), (width - image.GetWidth()) // 2, (height - image.GetHeight()) // 2)
+        dc.SelectObject(wx.NullBitmap)
+        return bitmap
+
+    def _request_art(self):
+        """Every third of a second: fetch thumbnails for the entries currently on screen."""
+        if self.page is not self.p_main or not self.pane_items or self.api is None:
+            return
+        size = self.pane.GetClientSize()
+        seen = []
+        for fx in (0.04, 0.27, 0.5, 0.73, 0.96):
+            for fy in (0.05, 0.35, 0.65, 0.95):
+                hit = self.pane.HitTest(wx.Point(int(size.width * fx), int(size.height * fy)))
+                index = hit[0] if isinstance(hit, (tuple, list)) else hit
+                if isinstance(index, int) and index >= 0:
+                    seen.append(index)
+        if not seen:
+            seen = [0]
+        first, last = max(0, min(seen) - 12), min(len(self.pane_items) - 1, max(seen) + 12)
+        api, generation = self.api, self.art_generation
+        width, height = self.thumb
+        for row in range(first, last + 1):
+            if row in self.art_requested:
+                continue
+            self.art_requested.add(row)
+            url = api.image_url(self.pane_items[row], self.pane_wide, width, height)
+            if not url:
+                continue
+
+            def done(data, error, row=row):
+                if error or not data or generation != self.art_generation:
+                    return
+                bitmap = self._canvas(data)
+                if bitmap is None or row >= self.pane.GetItemCount():
+                    return
+                index = self.image_list.Add(bitmap)
+                if index >= 0:
+                    self.pane.SetItemImage(row, index)
+
+            run_async(lambda url=url: api.fetch(url), done)
+
+    def _pane_selected(self):
+        focus = wx.Window.FindFocus()
+        if focus is not None and focus.GetId() == self.pane.GetId():
+            self._show_info(self._pane_item())
+
+    def _pane_selection(self):
+        return self.pane.GetFirstSelected()
+
+    def _pane_item(self):
+        index = self._pane_selection()
+        return self.pane_items[index] if 0 <= index < len(self.pane_items) else None
+
+    def _pane_select(self, index):
+        self.pane.Select(index)
+        self.pane.Focus(index)
+        self.pane.EnsureVisible(index)
+        self._show_info(self._pane_item())
+
+    def _focus_pane(self):
+        if not self.pane_items:
+            return
+        if self._pane_selection() < 0:
+            self._pane_select(0)
+        self.pane.SetFocus()
+        self._show_info(self._pane_item())
+
+    def _focus_tree(self):
+        self.tree.SetFocus()
+        self._show_info(self._tree_item())
+
+    def _pane_activate(self, index):
+        """Enter / A on a thumbnail: open a folder, or play a video."""
+        if not 0 <= index < len(self.pane_items):
+            return
+        item = self.pane_items[index]
+        node = self.pane_node
+        data = self._data(node) or {}
+        if data.get("kind") == "folder":
+            match = next((child for child in self._children(node)
+                          if ((self._data(child) or {}).get("item") or {}).get("Id") == item.get("Id")), None)
+        else:
+            match = node                         # the pane shows this one video
+            if data.get("kind") == "play":
+                match = self.tree.GetItemParent(node)
+        if match is None or not match.IsOk():
+            return
+        kind = (self._data(match) or {}).get("kind")
+        self.tree.EnsureVisible(match)
+        if kind == "folder":                     # open it, keeping the controller on the thumbnails
+            self.tree.SelectItem(match)
+            self.tree.Expand(match)
+            self.pane_focus_after = True
+            self.pane_timer.StartOnce(1)
+        elif kind == "video" and self.tree.ItemHasChildren(match):
+            self.tree.SelectItem(match)          # part-watched: offer Resume / Play from the beginning
+            self.tree.Expand(match)
+            first, _cookie = self.tree.GetFirstChild(match)
+            if first.IsOk():
+                self.tree.SelectItem(first)
+            self._focus_tree()
+        elif kind == "video":
+            self._play(match, item, 0)
+
+    def _pane_step(self, code):
+        """Controller navigation among the thumbnails."""
+        geometry = {wx.WXK_UP: wx.LIST_NEXT_ABOVE, wx.WXK_DOWN: wx.LIST_NEXT_BELOW,
+                    wx.WXK_LEFT: wx.LIST_NEXT_LEFT, wx.WXK_RIGHT: wx.LIST_NEXT_RIGHT}.get(code)
+        if geometry is None or not self.pane_items:
+            return
+        index = self._pane_selection()
+        if index < 0:
+            self._pane_select(0)
+            return
+        target = self.pane.GetNextItem(index, geometry)
+        if target >= 0:
+            self._pane_select(target)
+        elif code == wx.WXK_LEFT:
+            self._focus_tree()               # Left from the first column returns to the tree
+
     # ---- playback -------------------------------------------------------
     def _play(self, node, item, start):
         api, tree = self.api, self.tree
-        title = item_label(item)
-        if item.get("SeriesName") and item.get("Type") == "Episode":
-            title = f"{item['SeriesName']} - {title}"
+        title = item_label(item, with_series=True)
         try:
             self.player.play(api.stream_url(item), title, start)
         except Exception as exc:
@@ -1271,11 +1483,14 @@ class MainFrame(wx.Frame):
         api, session = self.api, self.session
 
         def done(_result, _error):
-            # Reload the folder so resume points and watched marks are current.
-            if session == self.session and folder is not None and folder.IsOk():
-                data = self._data(folder)
-                if data and data.get("kind") == "folder":
-                    self._load_folder(folder, select_id=item["Id"])
+            # Reload so resume points, watched marks and Watch next are current.
+            if session != self.session:
+                return
+            if folder is not None and folder.IsOk() and (self._data(folder) or {}).get("kind") == "folder":
+                self._load_folder(folder, select_id=item["Id"])
+            watch = self.watch_next
+            if watch is not None and watch.IsOk() and watch != folder and self._data(watch)["loaded"]:
+                self._load_folder(watch)
 
         run_async(lambda: api.report("stop", item["Id"], position), done)
 
@@ -1326,20 +1541,34 @@ class MainFrame(wx.Frame):
                     return False
                 return True
             return False
-        if self.page is self.p_main:
-            node = self._selected()
-            if focus_id != self.tree.GetId():
-                self.tree.SetFocus()
-            if node is None:
-                return False
+        if self.page is not self.p_main:
+            return False
+        if focus_id == self.pane.GetId():        # the thumbnails
+            index = self._pane_selection()
             if code in ENTER_KEYS:
-                self._activate(node)
-                return True
-            if code in BACK_KEYS:
-                self._step_back(node)
-                return True
-            return False             # arrows, Page Up / Down, letters: Windows' own tree handling
-        return False
+                self._pane_activate(index)
+            elif code in BACK_KEYS:
+                self._focus_tree()
+            elif code == wx.WXK_LEFT and (index < 0 or self.pane.GetNextItem(index, wx.LIST_NEXT_LEFT) < 0):
+                self._focus_tree()
+            else:
+                return False                     # arrows: Windows' own list handling
+            return True
+        if focus_id != self.tree.GetId():
+            self._focus_tree()
+        node = self._selected()
+        if node is None:
+            return False
+        if code in ENTER_KEYS:
+            self._activate(node)
+            return True
+        if code in BACK_KEYS:
+            self._step_back(node)
+            return True
+        if code == wx.WXK_RIGHT and not self.tree.ItemHasChildren(node) and self.pane_items:
+            self._focus_pane()                   # Right on a title moves across to its thumbnail
+            return True
+        return False                             # arrows, letters: Windows' own tree handling
 
     @staticmethod
     def _mpv_key(code, event):
@@ -1369,16 +1598,26 @@ class MainFrame(wx.Frame):
                 if command:
                     self.player.command(*command)
                 continue
+            if self.page is self.p_main and button == "LB":
+                self._focus_tree()
+                continue
+            if self.page is self.p_main and button == "RB":
+                self._focus_pane()
+                continue
             code = {"UP": wx.WXK_UP, "DOWN": wx.WXK_DOWN, "LEFT": wx.WXK_LEFT, "RIGHT": wx.WXK_RIGHT,
                     "A": wx.WXK_RETURN, "START": wx.WXK_RETURN, "B": wx.WXK_ESCAPE,
                     "BACK": wx.WXK_ESCAPE}.get(button)
             if code is None or self._handle_key(code):
                 continue
-            if self.page is self.p_main:         # the d-pad in the tree
-                self._tree_step(code)
+            if self.page is self.p_main:         # the d-pad in either pane
+                focus = wx.Window.FindFocus()
+                if focus is not None and focus.GetId() == self.pane.GetId():
+                    self._pane_step(code)
+                else:
+                    self._tree_step(code)
 
     def _on_close(self, _event):
-        for timer in (self.play_timer, self.pad_timer):
+        for timer in (self.play_timer, self.pad_timer, self.pane_timer, self.art_timer):
             timer.Stop()
         item, self.now_playing = self.now_playing, None
         if item is not None and self.api is not None and self.player.pos is not None:
